@@ -10,11 +10,11 @@ enum InputMessage {
     Broadcast(BroadcastMessage),
     Read(ReadMessage),
     Topology(TopologyMessage),
-    Sync(SyncMessageReceive),
+    Sync(SyncMessage),
     SyncOk(SyncOkMessage),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 struct BroadcastMessage {
     msg_id: usize,
     message: usize,
@@ -57,19 +57,10 @@ struct TopologyOkMessage {
     in_reply_to: usize,
 }
 
-
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename = "sync")]
-struct SyncMessageSend {
-    msg_id: usize,
-    messages: HashSet<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename = "sync")]
-struct SyncMessageReceive {
+struct SyncMessage {
     msg_id: usize,
     messages: HashSet<usize>,
 }
@@ -220,7 +211,7 @@ impl AsyncService<InputMessage> for BroadcastService {
                     src: self.node_id.clone(),
                     dest: neighbour.clone(),
                 },
-                body: SyncMessageSend {
+                body: SyncMessage {
                     msg_id: self.id.next(),
                     messages: to_send_messages,
                 },
