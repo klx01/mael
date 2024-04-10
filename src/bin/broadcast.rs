@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{RwLock};
+use rand::prelude::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, async_loop, InitMessage, Message, output_message};
 
@@ -45,6 +46,7 @@ struct ReadOkMessage {
 #[derive(Debug, Deserialize)]
 struct TopologyMessage {
     msg_id: usize,
+    #[allow(dead_code)]
     topology: HashMap<String, Vec<String>>,
 }
 
@@ -86,7 +88,7 @@ struct BroadcastService {
     id: MessageIdGenerator,
     node_id: String,
     messages: RwLock<HashSet<usize>>,
-    neighbours: RwLock<Option<HashMap<String, HashSet<usize>>>>,
+    neighbours: RwLock<HashMap<String, HashSet<usize>>>,
 }
 impl BroadcastService {
     fn copy_messages(&self) -> HashSet<usize> {
@@ -98,7 +100,7 @@ impl BroadcastService {
         drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
         copy
     }
-    fn copy_neighbours(&self) -> Option<HashMap<String, HashSet<usize>>> {
+    fn copy_neighbours(&self) -> HashMap<String, HashSet<usize>> {
         /*
         i wonder if it's possible to refactor some usages to remove cloning? does not seem like it is at the moment
          */
@@ -109,12 +111,7 @@ impl BroadcastService {
     }
     fn add_to_known_for_neighbour(&self, neighbour: &String, messages: &HashSet<usize>) -> bool {
         let mut lock = self.neighbours.write().expect("got a poisoned lock, cant really handle it");
-        let Some(neighbours) = lock.as_mut() else {
-            drop(lock);
-            eprintln!("empty neighbours list, seems like we've got the message before topology was set");
-            return false;
-        };
-        let Some(confirmed) = neighbours.get_mut(neighbour) else {
+        let Some(confirmed) = lock.get_mut(neighbour) else {
             drop(lock);
             eprintln!("got a message from {neighbour} which is not in the neighbours list");
             return false;
@@ -123,37 +120,24 @@ impl BroadcastService {
         drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
         true
     }
-    fn set_topology(&self, message: &mut TopologyMessage) -> bool {
-        let neighbours = match message.topology.remove(&self.node_id) {
-            Some(neighbours) => neighbours,
-            None => {
-                eprintln!("no neighbours for current node in the topology message");
-                return false;
-            }
-        };
-        let mut neighbours_messages = HashMap::new();
-        for neighbour in neighbours {
-            neighbours_messages.insert(neighbour, HashSet::new());
-        }
-
-        let mut lock = self.neighbours.write().expect("got a poisoned lock, cant really handle it");
-        if lock.as_ref().is_some() {
-            drop(lock);
-            eprintln!("tried to reinitialize neighbours, ignoring");
-            return false;
-        }
-        lock.replace(neighbours_messages);
-        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
-        true
-    }
 }
 impl AsyncService<InputMessage> for BroadcastService {
     fn new(init_message: InitMessage) -> Self {
+        let other_nodes_count = init_message.node_ids.len() - 1;
+        let nodes_to_notify_count = if other_nodes_count > 0 { (other_nodes_count / 2) + 1} else { 0 };
+        let neighbours = init_message
+            .node_ids
+            .into_iter()
+            .filter(|x| *x != init_message.node_id)
+            .choose_multiple(&mut rand::thread_rng(), nodes_to_notify_count)
+            .into_iter()
+            .map(|node| (node, HashSet::new()))
+            .collect::<HashMap<_, _>>();
         Self {
             id: Default::default(),
             node_id: init_message.node_id,
             messages: RwLock::new(HashSet::new()),
-            neighbours: RwLock::new(None),
+            neighbours: RwLock::new(neighbours),
         }
     }
 
@@ -179,8 +163,7 @@ impl AsyncService<InputMessage> for BroadcastService {
                 };
                 output_reply(output, meta);
             },
-            InputMessage::Topology(mut message) => {
-                self.set_topology(&mut message);
+            InputMessage::Topology(message) => {
                 let output = TopologyOkMessage {
                     msg_id: self.id.next(),
                     in_reply_to: message.msg_id,
@@ -210,10 +193,6 @@ impl AsyncService<InputMessage> for BroadcastService {
 
     fn on_timeout(&self) {
         let neighbours = self.copy_neighbours();
-        let Some(neighbours) = neighbours else {
-            eprintln!("sync called before we got topology");
-            return;
-        };
         let messages = self.copy_messages();
         for (neighbour, confirmed_messages) in neighbours.iter() {
             /*
@@ -221,6 +200,7 @@ impl AsyncService<InputMessage> for BroadcastService {
             but i can't, because it references self.
             i could extract those references outside, but that would mean incrementing the ids when we don't send messages
             every 100ms by the amount of neighbours. And i don't really like that.
+            or maybe refactor it in a way that could use the Arc?
             so i've only left the output inside the spawn. Is there even any point in that?
             not sure. But it can block, so i guess there might be some point
              */
@@ -262,5 +242,5 @@ async fn main() {
 {"src": "n3", "dest": "n1", "body": {"type": "sync_ok", "msg_id": 6, "in_reply_to": 5, "messages": [2000]}}
 
      */
-    async_loop::<BroadcastService, InputMessage>(100).await;
+    async_loop::<BroadcastService, InputMessage>(500).await;
 }
