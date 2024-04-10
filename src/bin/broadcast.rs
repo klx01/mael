@@ -129,7 +129,7 @@ impl AsyncService<InputMessage> for BroadcastService {
             .skip(current_pos + 1)
             .take(nodes_to_notify_count)
             .map(|node| (node, HashSet::new()))
-            .collect::<HashMap<_, _>>();
+            .collect();
         Self {
             id: Default::default(),
             node_id: init_message.node_id,
