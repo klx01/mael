@@ -45,5 +45,5 @@ async fn main() {
 {"src": "c1", "dest": "n1", "body": {"type": "generate", "msg_id": 2}}
 
      */
-    async_loop::<UniqService, GenerateMessage>(0).await;
+    async_loop::<UniqService, GenerateMessage>(0, 0).await;
 }

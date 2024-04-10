@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, sync_loop, InitMessage, Message, output_message};
-use rand::seq::IteratorRandom;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -101,14 +100,21 @@ impl BroadcastService {
 }
 impl SyncService<InputMessage> for BroadcastService {
     fn new(init_message: InitMessage) -> Self {
-        let other_nodes_count = init_message.node_ids.len() - 1;
-        let nodes_to_notify_count = if other_nodes_count > 0 { (other_nodes_count / 2) + 1} else { 0 }; 
-        let neighbours = init_message
-            .node_ids
-            .into_iter()
-            .filter(|x| *x != init_message.node_id)
-            .choose_multiple(&mut rand::thread_rng(), nodes_to_notify_count)
-            .into_iter()
+        let node_ids = init_message.node_ids;
+        let other_nodes_count = node_ids.len() - 1;
+        let nodes_to_notify_count = if other_nodes_count > 0 { (other_nodes_count / 2) + 1} else { 0 };
+        let current_pos = node_ids.iter().position(|x| *x == init_message.node_id).unwrap();
+        let copy = node_ids.clone(); // this is unpleasant, but i'm not sure how else to do it
+        /*
+        we are taking the next nodes_to_notify_count nodes in order.
+        at first i was just taking any nodes_to_notify_count nodes randomly, but in that case it is possible for a node to be no one's neighbour.
+        and this way we can guarantee that all nodes are someone's neighbours.
+        i would like the nodes that we take to be shuffled, and collecting them into a hashmap kind of takes care of that
+         */
+        let neighbours = node_ids.into_iter()
+            .chain(copy.into_iter())
+            .skip(current_pos + 1)
+            .take(nodes_to_notify_count)
             .map(|node| (node, HashSet::new()))
             .collect::<HashMap<_, _>>();
         Self {
@@ -199,5 +205,5 @@ fn main() {
 {"src": "n3", "dest": "n1", "body": {"type": "sync_ok", "msg_id": 6, "in_reply_to": 5, "messages": [2000]}}
 
      */
-    sync_loop::<BroadcastService, InputMessage>(500);
+    sync_loop::<BroadcastService, InputMessage>(400, 600);
 }

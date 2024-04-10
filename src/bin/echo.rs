@@ -43,5 +43,5 @@ async fn main() {
 {"src": "c1", "dest": "n1", "body": {"type": "echo", "msg_id": 2, "echo": "Please echo 35"}}
 
      */
-    async_loop::<EchoService, EchoMessage>(0).await;
+    async_loop::<EchoService, EchoMessage>(0, 0).await;
 }

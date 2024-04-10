@@ -2,9 +2,11 @@ use std::{io, thread, time};
 use std::sync::{Arc, mpsc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
 use tokio::select;
+use tokio::time::Instant;
 
 #[derive(Serialize, Deserialize)]
 pub struct Message<T> {
@@ -86,20 +88,30 @@ pub fn output_message<B: Serialize>(message: Message<B>) {
     drop(guard); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop 
 }
 
-pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(timeout: u64) {
+pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(timeout_from: u64, timeout_to: u64) {
+    assert!(timeout_to >= timeout_from);
+    if timeout_to > 0 {
+        assert!(timeout_from > 0);
+    }
     let Some(Message {meta, body}) = get_init_message() else {
         return;
     };
     output_reply(InitOkMessage{ in_reply_to: body.msg_id }, meta);
 
     // is there any better way to handle services that don't need timeouts?
-    let timeout = if timeout > 0 { timeout } else { 1000000 };
+    let (timeout_from, timeout_to) = if timeout_from > 0 {
+        (timeout_from, timeout_to)
+    } else {
+        (1000000, 1000000)
+    }; 
     let service = Arc::new(T::new(body));
 
     let tokio_stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(tokio_stdin);
     let mut lines = reader.lines();
-    let mut interval = tokio::time::interval(Duration::from_millis(timeout));
+    let timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
+    let stub_duration = Duration::from_millis(1000);
+    let mut interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
     loop {
         select! {
             line = lines.next_line() => {
@@ -124,12 +136,18 @@ pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(timeout:
                 tokio::spawn(async move {
                     service.on_timeout();
                 });
+                let timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
+                interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
             }
         }
     }
 }
 
-pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(timeout: u128) {
+pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(timeout_from: u128, timeout_to: u128) {
+    assert!(timeout_to >= timeout_from);
+    if timeout_to > 0 {
+        assert!(timeout_from > 0);
+    }
     let Some(Message {meta, body}) = get_init_message() else {
         return;
     };
@@ -144,6 +162,8 @@ pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(timeout: u128) {
             tx.send(line).unwrap()
         }
     });
+    
+    let mut timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
 
     let mut last_timeout_ts = time::Instant::now();
     if timeout > 0 {
@@ -153,6 +173,7 @@ pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(timeout: u128) {
             if time_spent > timeout {
                 service.on_timeout();
                 last_timeout_ts = now;
+                timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
             } else {
                 let message = rx.recv_timeout(Duration::from_millis((timeout - time_spent) as u64));
                 let message = match message {
