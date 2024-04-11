@@ -82,8 +82,8 @@ pub trait SyncService<M>{
     fn on_timeout(&mut self);
 }
 pub trait AsyncService<M>: Sync + Send + 'static {
-    fn process_message(&self, message: M, meta: MessageMeta);
-    fn on_timeout(&self);
+    fn process_message(&self, message: M, meta: MessageMeta) -> impl std::future::Future<Output = ()> + Send;
+    fn on_timeout(&self) -> impl std::future::Future<Output = ()> + Send;
 }
 pub trait DefaultInitService {
     fn new(init_message: InitMessage) -> Self;
@@ -112,7 +112,7 @@ pub fn output_message<B: Serialize>(message: Message<B>) {
     drop(guard); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
 }
 
-pub async fn async_loop_with_timeout<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(service: Arc<T>, timeout_range: RangeInclusive<u64>) {
+pub async fn async_loop_with_timeout<T: AsyncService<M>, M: for<'a> Deserialize<'a> + Send>(service: Arc<T>, timeout_range: RangeInclusive<u64>) {
     assert!(!timeout_range.is_empty());
     let tokio_stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(tokio_stdin);
@@ -134,7 +134,7 @@ pub async fn async_loop_with_timeout<T: AsyncService<M>, M: for<'a> Deserialize<
                 tokio::spawn(async move {
                     let message = serde_json::from_str::<Message<M>>(&line);
                     match message {
-                        Ok(message) => service.process_message(message.body, message.meta),
+                        Ok(message) => service.process_message(message.body, message.meta).await,
                         Err(err) => eprintln!("error decoding message: {err} {line}"),
                     };
                 });
@@ -142,7 +142,7 @@ pub async fn async_loop_with_timeout<T: AsyncService<M>, M: for<'a> Deserialize<
             _ = interval.tick() => {
                 let service = service.clone();
                 tokio::spawn(async move {
-                    service.on_timeout();
+                    service.on_timeout().await;
                 });
                 let timeout = rand::thread_rng().gen_range(timeout_range.clone());
                 interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
@@ -207,7 +207,7 @@ pub fn default_init_service<T: DefaultInitService>() -> Option<T> {
     Some(service)
 }
 
-pub async fn default_init_and_async_loop<T: AsyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a>>(timeout: RangeInclusive<u64>) {
+pub async fn default_init_and_async_loop<T: AsyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a> + Send>(timeout: RangeInclusive<u64>) {
     let Some(service) = default_init_service::<T>() else {
         return;
     };
@@ -233,7 +233,7 @@ pub fn get_init_message() -> Option<InitMessage> {
     let Message {meta, body} = wait_until_message::<InitMessage>()?;
     /*
     need to correctly handle the situation where init_ok message was lost, and init request was retried
-    same for topology request in the broadcast challenge 
+    same for topology request in the broadcast challenge
      */
     output_reply(InitOkMessage{ in_reply_to: body.msg_id }, meta);
     Some(body)

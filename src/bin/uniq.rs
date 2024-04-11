@@ -27,7 +27,7 @@ impl DefaultInitService for UniqService {
     }
 }
 impl AsyncService<GenerateMessage> for UniqService {
-    fn process_message(&self, message: GenerateMessage, meta: MessageMeta) {
+    async fn process_message(&self, message: GenerateMessage, meta: MessageMeta) {
         let msg_id = self.id.next();
         let output = GenerateOkMessage {
             msg_id: msg_id,
@@ -37,7 +37,7 @@ impl AsyncService<GenerateMessage> for UniqService {
         output_reply(output, meta);
     }
 
-    fn on_timeout(&self) {
+    async fn on_timeout(&self) {
         // empty
     }
 }

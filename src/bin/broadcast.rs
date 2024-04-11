@@ -137,7 +137,7 @@ impl BroadcastService {
     }
 }
 impl AsyncService<InputMessage> for BroadcastService {
-    fn process_message(&self, message: InputMessage, meta: MessageMeta) {
+    async fn process_message(&self, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Broadcast(message) => {
                 let mut lock = self.messages.write().expect("got a poisoned lock, cant really handle it");
@@ -180,7 +180,7 @@ impl AsyncService<InputMessage> for BroadcastService {
         }
     }
 
-    fn on_timeout(&self) {
+    async fn on_timeout(&self) {
         let neighbours = self.copy_neighbours();
         let messages = self.copy_messages();
         for (neighbour, confirmed_messages) in neighbours.iter() {

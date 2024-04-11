@@ -156,7 +156,7 @@ impl KafkaService {
     }
 }
 impl AsyncService<InputMessage> for KafkaService {
-    fn process_message(&self, message: InputMessage, meta: MessageMeta) {
+    async fn process_message(&self, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Send(message) => {
                 // todo: correctly handle retries
@@ -266,13 +266,14 @@ impl AsyncService<InputMessage> for KafkaService {
         }
     }
 
-    fn on_timeout(&self) {
+    async fn on_timeout(&self) {
         // empty
     }
 }
 
 #[tokio::main]
 async fn main() {
+    // cargo build --release && ./maelstrom/maelstrom test -w kafka --bin ./target/release/kafka --node-count 1 --concurrency 2n --time-limit 20 --rate 10
     // cargo build --release && ./maelstrom/maelstrom test -w kafka --bin ./target/release/kafka --node-count 1 --concurrency 2n --time-limit 20 --rate 1000
     // cargo build --release && ./maelstrom/maelstrom test -w kafka --bin ./target/release/kafka --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
     /*

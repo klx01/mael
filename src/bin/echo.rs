@@ -27,7 +27,7 @@ impl DefaultInitService for EchoService {
     }
 }
 impl AsyncService<EchoMessage> for EchoService {
-    fn process_message(&self, message: EchoMessage, meta: MessageMeta) {
+    async fn process_message(&self, message: EchoMessage, meta: MessageMeta) {
         let output = EchoOkMessage {
             msg_id: self.id.next(),
             in_reply_to: message.msg_id,
@@ -36,7 +36,7 @@ impl AsyncService<EchoMessage> for EchoService {
         output_reply(output, meta);
     }
 
-    fn on_timeout(&self) {
+    async fn on_timeout(&self) {
         // empty
     }
 }
