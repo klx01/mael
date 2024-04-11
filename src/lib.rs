@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serde_repr::Serialize_repr;
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use tokio::io::AsyncBufReadExt;
 use tokio::select;
 use tokio::time::Instant;
@@ -39,7 +39,7 @@ struct InitOkMessage {
     in_reply_to: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename = "error")]
 pub struct ErrorMessage {
@@ -48,7 +48,7 @@ pub struct ErrorMessage {
     pub text: String,
 }
 
-#[derive(Debug, Serialize_repr, Copy, Clone)]
+#[derive(Debug, Serialize_repr, Deserialize_repr, Copy, Clone)]
 #[repr(u8)]
 pub enum ErrorCode {
     Timeout = 0,

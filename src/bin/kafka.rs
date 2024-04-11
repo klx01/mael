@@ -1,7 +1,8 @@
 use std::cmp;
 use std::collections::HashMap;
+use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, ErrorMessage, ErrorCode, DefaultInitService, default_init_and_sync_loop_simple};
+use mael::{MessageIdGenerator, MessageMeta, output_reply, InitMessage, ErrorMessage, ErrorCode, DefaultInitService, default_init_and_async_loop, get_stub_timeout, AsyncService};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -11,6 +12,10 @@ enum InputMessage {
     Poll(PollMessage),
     CommitOffsets(CommitOffsetsMessage),
     ListCommittedOffsets(ListCommittedOffsetsMessage),
+    /*ReadOk(KVReadOkMessage),
+    WriteOk(KVWriteOkMessage),
+    CasOk(KVCasOkMessage),
+    Error(ErrorMessage),*/
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,42 +78,95 @@ struct ListCommittedOffsetsOkMessage {
     offsets: HashMap<String, usize>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "write")]
+struct KVWriteMessage {
+    msg_id: usize,
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KVWriteOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "read")]
+struct KVReadMessage {
+    msg_id: usize,
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KVReadOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    value: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "cas")]
+struct KVCasMessage {
+    msg_id: usize,
+    key: String,
+    from: String,
+    to: String,
+    create_if_not_exists: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct KVCasOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+}
+
 const POLL_MAX_LEN: usize = 50;
+const KV_NODE_NAME: &'static str = "lin-kv";
 
 struct KafkaService {
     id: MessageIdGenerator,
     node_id: String,
-    messages: HashMap<String, Vec<usize>>,
-    committed_offsets: HashMap<String, usize>,
-    processed_send_messages: HashMap<String, usize>, // this grows indefinitely; maybe we could somehow periodically discard the old ones
+    messages: RwLock<HashMap<String, Vec<usize>>>,
+    committed_offsets: RwLock<HashMap<String, usize>>,
 }
 impl DefaultInitService for KafkaService {
     fn new(init_message: InitMessage) -> Self {
         Self {
             id: Default::default(),
             node_id: init_message.node_id,
-            messages: HashMap::new(),
-            committed_offsets: HashMap::new(),
-            processed_send_messages: HashMap::new(),
+            messages: Default::default(),
+            committed_offsets: Default::default(),
         }
     }
 }
-impl SyncService<InputMessage> for KafkaService {
-    fn process_message(&mut self, message: InputMessage, meta: MessageMeta) {
+impl KafkaService {
+    fn copy_lengths(&self) -> HashMap<String, usize> {
+        let lock = self.messages.read().expect("got a poisoned lock, cant really handle it");
+        let result = lock
+            .iter()
+            .map(|(key, val)| (key.clone(), val.len()))
+            .collect();
+        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
+        result
+    }
+}
+impl AsyncService<InputMessage> for KafkaService {
+    fn process_message(&self, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Send(message) => {
-                let message_id = format!("{}_{}", meta.src.clone(), message.msg_id);
-                let offset = self.processed_send_messages.get(&message_id);
-                let offset = match offset {
-                    Some(offset) => *offset,
-                    None => {
-                        let log = self.messages.entry(message.key).or_insert(vec![]);
-                        let offset = log.len();
-                        log.push(message.msg);
-                        self.processed_send_messages.insert(message_id, offset);
-                        offset
-                    }
-                };
+                // todo: correctly handle retries
+                // todo: maybe try to not lock the whole hashmap for this?
+                let mut lock = self.messages.write().expect("got a poisoned lock, cant really handle it");
+                let log = lock.entry(message.key).or_insert(vec![]);
+                let offset = log.len();
+                log.push(message.msg);
+                drop(lock);
+
                 let output = SendOkMessage {
                     msg_id: self.id.next(),
                     in_reply_to: message.msg_id,
@@ -117,9 +175,10 @@ impl SyncService<InputMessage> for KafkaService {
                 output_reply(output, meta);
             }
             InputMessage::Poll(message) => {
+                let lock = self.messages.read().expect("got a poisoned lock, cant really handle it");
                 let mut response = HashMap::new();
                 for (key, offset) in message.offsets {
-                    let log = self.messages.get(&key);
+                    let log = lock.get(&key);
                     let Some(log) = log else {
                         continue;
                     };
@@ -136,6 +195,8 @@ impl SyncService<InputMessage> for KafkaService {
                         .collect::<Vec<_>>();
                     response.insert(key, messages);
                 }
+                drop(lock);
+
                 let output = PollOkMessage {
                     msg_id: self.id.next(),
                     in_reply_to: message.msg_id,
@@ -144,9 +205,10 @@ impl SyncService<InputMessage> for KafkaService {
                 output_reply(output, meta);
             }
             InputMessage::CommitOffsets(message) => {
+                let key_lengths = self.copy_lengths();
                 for (key, offset) in message.offsets.iter() {
-                    let log = self.messages.get(key);
-                    let Some(log) = log else {
+                    let length = key_lengths.get(key);
+                    let Some(length) = length else {
                         let error = ErrorMessage {
                             in_reply_to: message.msg_id,
                             code: ErrorCode::KeyDoesNotExist,
@@ -155,7 +217,7 @@ impl SyncService<InputMessage> for KafkaService {
                         output_reply(error, meta);
                         return;
                     };
-                    if *offset >= log.len() {
+                    if *offset >= *length {
                         let error = ErrorMessage {
                             in_reply_to: message.msg_id,
                             code: ErrorCode::PreconditionFailed,
@@ -165,12 +227,16 @@ impl SyncService<InputMessage> for KafkaService {
                         return;
                     }
                 }
+
+                let mut lock = self.committed_offsets.write().expect("got a poisoned lock, cant really handle it");
                 for (key, offset) in message.offsets {
-                    let committed = self.committed_offsets.entry(key).or_insert(0);
+                    let committed = lock.entry(key).or_insert(0);
                     if offset >= *committed {
                         *committed = offset;
                     }
                 }
+                drop(lock);
+
                 let output = CommitOffsetsOkMessage {
                     msg_id: self.id.next(),
                     in_reply_to: message.msg_id,
@@ -179,14 +245,17 @@ impl SyncService<InputMessage> for KafkaService {
             }
             InputMessage::ListCommittedOffsets(message) => {
                 let mut response = HashMap::new();
+                let lock = self.committed_offsets.read().expect("got a poisoned lock, cant really handle it");
                 for key in message.keys {
-                    let offset = self.committed_offsets.get(&key);
+                    let offset = lock.get(&key);
                     let Some(offset) = offset else {
                         // the task description mentions that keys that don't exist can be omitted
                         continue;
                     };
                     response.insert(key, *offset);
                 }
+                drop(lock);
+
                 let output = ListCommittedOffsetsOkMessage {
                     msg_id: self.id.next(),
                     in_reply_to: message.msg_id,
@@ -197,12 +266,13 @@ impl SyncService<InputMessage> for KafkaService {
         }
     }
 
-    fn on_timeout(&mut self) {
+    fn on_timeout(&self) {
         // empty
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // cargo build --release && ./maelstrom/maelstrom test -w kafka --bin ./target/release/kafka --node-count 1 --concurrency 2n --time-limit 20 --rate 1000
     // cargo build --release && ./maelstrom/maelstrom test -w kafka --bin ./target/release/kafka --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
     /*
@@ -220,5 +290,5 @@ fn main() {
 {"id":13,"src":"c3","dest":"n1","body":{"type":"list_committed_offsets","msg_id":110,"keys":["k1"]}}
 
      */
-    default_init_and_sync_loop_simple::<KafkaService, InputMessage>();
+    default_init_and_async_loop::<KafkaService, InputMessage>(get_stub_timeout()).await;
 }
