@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, async_loop, InitMessage};
+use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, get_stub_timeout, DefaultInitService, default_init_and_async_loop};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -21,11 +21,12 @@ struct UniqService {
     id: MessageIdGenerator,
     node_id: String,
 }
-impl AsyncService<GenerateMessage> for UniqService {
+impl DefaultInitService for UniqService {
     fn new(init_message: InitMessage) -> Self {
         Self { id: Default::default(), node_id: init_message.node_id }
     }
-
+}
+impl AsyncService<GenerateMessage> for UniqService {
     fn process_message(&self, message: GenerateMessage, meta: MessageMeta) {
         let msg_id = self.id.next();
         let output = GenerateOkMessage {
@@ -34,6 +35,10 @@ impl AsyncService<GenerateMessage> for UniqService {
             id: format!("{}_{msg_id}", self.node_id),
         };
         output_reply(output, meta);
+    }
+
+    fn on_timeout(&self) {
+        // empty
     }
 }
 
@@ -45,5 +50,5 @@ async fn main() {
 {"src": "c1", "dest": "n1", "body": {"type": "generate", "msg_id": 2}}
 
      */
-    async_loop::<UniqService, GenerateMessage>(0, 0).await;
+    default_init_and_async_loop::<UniqService, GenerateMessage>(get_stub_timeout()).await
 }

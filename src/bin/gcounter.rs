@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, sync_loop, InitMessage, Message, output_message};
+use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, Message, output_message, DefaultInitService, default_init_and_sync_loop_with_timeout};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -68,8 +68,15 @@ struct GCounterService {
     counter: usize,
     processed_adds: HashSet<String>, // this grows indefinitely; maybe we could somehow periodically discard the old ones
     other_counters: HashMap<String, usize>,
+    /*
+    the task says that nodes should be stateless, so this solution is probably incorrect. Or maybe it is correct?
+    i think that it would work well too.
+    it is already writing counters into the storage, so if the node goes down, it can just read it back from storage during the initialisation.
+    i don't really see what exactly would be improved by making it truly stateless.
+    maybe the case where multiple nodes accidentally get the same id?
+     */
 }
-impl SyncService<InputMessage> for GCounterService {
+impl DefaultInitService for GCounterService {
     fn new(init_message: InitMessage) -> Self {
         let other_counters = init_message
             .node_ids
@@ -85,7 +92,8 @@ impl SyncService<InputMessage> for GCounterService {
             other_counters: other_counters,
         }
     }
-
+}
+impl SyncService<InputMessage> for GCounterService {
     fn process_message(&mut self, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Add(message) => {
@@ -167,5 +175,5 @@ fn main() {
 {"id":8,"src":"seq-kv","dest":"n1","body":{"type":"write_ok","msg_id":105}}
 
      */
-    sync_loop::<GCounterService, InputMessage>(400, 600);
+    default_init_and_sync_loop_with_timeout::<GCounterService, InputMessage>(400..=600);
 }

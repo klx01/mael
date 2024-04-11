@@ -1,4 +1,5 @@
 use std::{io, thread, time};
+use std::ops::RangeInclusive;
 use std::sync::{Arc, mpsc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -77,14 +78,15 @@ impl Default for MessageIdGenerator {
 }
 
 pub trait SyncService<M>{
-    fn new(init_message: InitMessage) -> Self;
     fn process_message(&mut self, message: M, meta: MessageMeta);
-    fn on_timeout(&mut self) {}
+    fn on_timeout(&mut self);
 }
 pub trait AsyncService<M>: Sync + Send + 'static {
-    fn new(init_message: InitMessage) -> Self;
     fn process_message(&self, message: M, meta: MessageMeta);
-    fn on_timeout(&self) {}
+    fn on_timeout(&self);
+}
+pub trait DefaultInitService {
+    fn new(init_message: InitMessage) -> Self;
 }
 
 pub fn output_reply<T: Serialize>(body: T, input_meta: MessageMeta) {
@@ -110,28 +112,12 @@ pub fn output_message<B: Serialize>(message: Message<B>) {
     drop(guard); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
 }
 
-pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(timeout_from: u64, timeout_to: u64) {
-    assert!(timeout_to >= timeout_from);
-    if timeout_to > 0 {
-        assert!(timeout_from > 0);
-    }
-    let Some(Message {meta, body}) = get_init_message() else {
-        return;
-    };
-    output_reply(InitOkMessage{ in_reply_to: body.msg_id }, meta);
-
-    // is there any better way to handle services that don't need timeouts?
-    let (timeout_from, timeout_to) = if timeout_from > 0 {
-        (timeout_from, timeout_to)
-    } else {
-        (1000000, 1000000)
-    };
-    let service = Arc::new(T::new(body));
-
+pub async fn async_loop_with_timeout<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(service: Arc<T>, timeout_range: RangeInclusive<u64>) {
+    assert!(!timeout_range.is_empty());
     let tokio_stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(tokio_stdin);
     let mut lines = reader.lines();
-    let timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
+    let timeout = rand::thread_rng().gen_range(timeout_range.clone());
     let stub_duration = Duration::from_millis(1000);
     let mut interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
     loop {
@@ -158,25 +144,15 @@ pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(timeout_
                 tokio::spawn(async move {
                     service.on_timeout();
                 });
-                let timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
+                let timeout = rand::thread_rng().gen_range(timeout_range.clone());
                 interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
             }
         }
     }
 }
 
-pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(timeout_from: u128, timeout_to: u128) {
-    assert!(timeout_to >= timeout_from);
-    if timeout_to > 0 {
-        assert!(timeout_from > 0);
-    }
-    let Some(Message {meta, body}) = get_init_message() else {
-        return;
-    };
-    output_reply(InitOkMessage{ in_reply_to: body.msg_id }, meta);
-
-    let mut service = T::new(body);
-
+pub fn sync_loop_with_timeout<T: SyncService<M>, M: for<'a> Deserialize<'a>>(service: &mut T, timeout_range: RangeInclusive<u128>) {
+    assert!(!timeout_range.is_empty());
     let (tx, rx) = mpsc::channel();
     let stdin = io::stdin();
     let input_thread = thread::spawn(move || {
@@ -185,49 +161,88 @@ pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(timeout_from: u1
         }
     });
 
-    let mut timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
-
+    let mut timeout = rand::thread_rng().gen_range(timeout_range.clone());
     let mut last_timeout_ts = time::Instant::now();
-    if timeout > 0 {
-        loop {
-            let now = time::Instant::now();
-            let time_spent = (now - last_timeout_ts).as_millis();
-            if time_spent > timeout {
-                service.on_timeout();
-                last_timeout_ts = now;
-                timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
-            } else {
-                let message = rx.recv_timeout(Duration::from_millis((timeout - time_spent) as u64));
-                let message = match message {
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Ok(message) => message,
-                };
-                match parse_line(message) {
-                    Some(message) => service.process_message(message.body, message.meta),
-                    None => (),
-                }
-            }
-        }
-        service.on_timeout();
-    } else {
-        for message in rx {
+    loop {
+        let now = time::Instant::now();
+        let time_spent = (now - last_timeout_ts).as_millis();
+        if time_spent > timeout {
+            service.on_timeout();
+            last_timeout_ts = now;
+            timeout = rand::thread_rng().gen_range(timeout_range.clone());
+        } else {
+            let message = rx.recv_timeout(Duration::from_millis((timeout - time_spent) as u64));
+            let message = match message {
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(message) => message,
+            };
             match parse_line(message) {
                 Some(message) => service.process_message(message.body, message.meta),
                 None => (),
             }
         }
     }
+
+    service.on_timeout();
     let thread_result = input_thread.join();
     if let Err(_) = thread_result {
         eprintln!("input thread error");
     }
 }
 
-fn get_init_message() -> Option<Message<InitMessage>> {
+pub fn sync_loop_simple<T: SyncService<M>, M: for<'a> Deserialize<'a>>(service: &mut T) {
     let stdin = io::stdin();
     for line in stdin.lines() {
         match parse_line(line) {
+            Some(message) => service.process_message(message.body, message.meta),
+            None => (),
+        }
+    }
+}
+
+pub fn default_init_service<T: DefaultInitService>() -> Option<T> {
+    let init_message = get_init_message()?;
+    let service = T::new(init_message);
+    Some(service)
+}
+
+pub async fn default_init_and_async_loop<T: AsyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a>>(timeout: RangeInclusive<u64>) {
+    let Some(service) = default_init_service::<T>() else {
+        return;
+    };
+    let service_arc = Arc::new(service);
+    async_loop_with_timeout(service_arc, timeout).await
+}
+
+pub fn default_init_and_sync_loop_with_timeout<T: SyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a>>(timeout: RangeInclusive<u128>) {
+    let Some(mut service) = default_init_service::<T>() else {
+        return;
+    };
+    sync_loop_with_timeout(&mut service, timeout);
+}
+
+pub fn default_init_and_sync_loop_simple<T: SyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a>>() {
+    let Some(mut service) = default_init_service::<T>() else {
+        return;
+    };
+    sync_loop_simple(&mut service);
+}
+
+pub fn get_init_message() -> Option<InitMessage> {
+    let Message {meta, body} = wait_until_message::<InitMessage>()?;
+    /*
+    need to correctly handle the situation where init_ok message was lost, and init request was retried
+    same for topology request in the broadcast challenge 
+     */
+    output_reply(InitOkMessage{ in_reply_to: body.msg_id }, meta);
+    Some(body)
+}
+
+pub fn wait_until_message<M: for<'a> Deserialize<'a>>() -> Option<Message<M>> {
+    let stdin = io::stdin();
+    for line in stdin.lines() {
+        match parse_line::<M>(line) {
             Some(message) => return Some(message),
             None => (),
         }
@@ -246,4 +261,8 @@ fn parse_line<M: for<'a> Deserialize<'a>>(line: Result<String, io::Error>) -> Op
         return None;
     };
     return Some(message);
+}
+
+pub fn get_stub_timeout() -> RangeInclusive<u64> {
+    100000..=100000
 }

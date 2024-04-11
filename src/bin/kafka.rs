@@ -1,7 +1,7 @@
 use std::cmp;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, sync_loop, InitMessage, ErrorMessage, ErrorCode};
+use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, ErrorMessage, ErrorCode, DefaultInitService, default_init_and_sync_loop_simple};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -82,17 +82,18 @@ struct KafkaService {
     committed_offsets: HashMap<String, usize>,
     processed_send_messages: HashMap<String, usize>, // this grows indefinitely; maybe we could somehow periodically discard the old ones
 }
-impl SyncService<InputMessage> for KafkaService {
+impl DefaultInitService for KafkaService {
     fn new(init_message: InitMessage) -> Self {
-        Self { 
-            id: Default::default(), 
+        Self {
+            id: Default::default(),
             node_id: init_message.node_id,
             messages: HashMap::new(),
             committed_offsets: HashMap::new(),
             processed_send_messages: HashMap::new(),
         }
     }
-
+}
+impl SyncService<InputMessage> for KafkaService {
     fn process_message(&mut self, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Send(message) => {
@@ -195,6 +196,10 @@ impl SyncService<InputMessage> for KafkaService {
             }
         }
     }
+
+    fn on_timeout(&mut self) {
+        // empty
+    }
 }
 
 fn main() {
@@ -215,5 +220,5 @@ fn main() {
 {"id":13,"src":"c3","dest":"n1","body":{"type":"list_committed_offsets","msg_id":110,"keys":["k1"]}}
 
      */
-    sync_loop::<KafkaService, InputMessage>(400, 600);
+    default_init_and_sync_loop_simple::<KafkaService, InputMessage>();
 }

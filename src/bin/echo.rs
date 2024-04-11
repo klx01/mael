@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, async_loop, InitMessage};
+use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, DefaultInitService, get_stub_timeout, default_init_and_async_loop};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -21,10 +21,12 @@ struct EchoOkMessage {
 struct EchoService {
     id: MessageIdGenerator,
 }
-impl AsyncService<EchoMessage> for EchoService {
+impl DefaultInitService for EchoService {
     fn new(_: InitMessage) -> Self {
         Self { id: Default::default() }
     }
+}
+impl AsyncService<EchoMessage> for EchoService {
     fn process_message(&self, message: EchoMessage, meta: MessageMeta) {
         let output = EchoOkMessage {
             msg_id: self.id.next(),
@@ -32,6 +34,10 @@ impl AsyncService<EchoMessage> for EchoService {
             echo: message.echo,
         };
         output_reply(output, meta);
+    }
+
+    fn on_timeout(&self) {
+        // empty
     }
 }
 
@@ -43,5 +49,5 @@ async fn main() {
 {"src": "c1", "dest": "n1", "body": {"type": "echo", "msg_id": 2, "echo": "Please echo 35"}}
 
      */
-    async_loop::<EchoService, EchoMessage>(0, 0).await;
+    default_init_and_async_loop::<EchoService, EchoMessage>(get_stub_timeout()).await
 }

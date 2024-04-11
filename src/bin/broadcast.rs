@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{RwLock};
+use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, async_loop, InitMessage, Message, output_message};
+use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, Message, output_message, get_init_message, async_loop_with_timeout, wait_until_message};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -9,7 +9,6 @@ use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, async_lo
 enum InputMessage {
     Broadcast(BroadcastMessage),
     Read(ReadMessage),
-    Topology(TopologyMessage),
     Sync(SyncMessage),
     SyncOk(SyncOkMessage),
 }
@@ -43,9 +42,10 @@ struct ReadOkMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename = "topology")]
 struct TopologyMessage {
     msg_id: usize,
-    #[allow(dead_code)]
     topology: HashMap<String, Vec<String>>,
 }
 
@@ -82,12 +82,30 @@ struct BroadcastService {
     /*
     messages and neighbours grow indefinitely.
     there is nothing we can do about messages, due to the nature of the task,
-    but neighbours can be compacted. 
+    but neighbours can be compacted.
     we can periodically extract messages that are known to all neighbours into a one separate set.
     and in can also be compacted together with current node's messages
      */
 }
 impl BroadcastService {
+    fn new(id: MessageIdGenerator, init_message: InitMessage, topology_message: TopologyMessage) -> Self {
+        let node_id = init_message.node_id;
+        let neighbours = Self::extract_neighbours(topology_message, &node_id);
+        Self {
+            id: id,
+            node_id: node_id,
+            messages: RwLock::new(HashSet::new()),
+            neighbours: RwLock::new(neighbours),
+        }
+    }
+    fn extract_neighbours(mut topology_message: TopologyMessage, current_id: &String) -> HashMap<String, HashSet<usize>> {
+        let neighbours = topology_message.topology.remove(current_id).expect("no neighbours for current node in the topology message");
+        let mut neighbours_messages = HashMap::new();
+        for neighbour in neighbours {
+            neighbours_messages.insert(neighbour, HashSet::new());
+        }
+        neighbours_messages
+    }
     fn copy_messages(&self) -> HashSet<usize> {
         /*
         i wonder if it's possible to refactor some usages to remove cloning? does not seem like it is at the moment
@@ -119,33 +137,6 @@ impl BroadcastService {
     }
 }
 impl AsyncService<InputMessage> for BroadcastService {
-    fn new(init_message: InitMessage) -> Self {
-        let node_ids = init_message.node_ids;
-        let other_nodes_count = node_ids.len() - 1;
-        let nodes_to_notify_count = if other_nodes_count > 0 { (other_nodes_count / 2) + 1} else { 0 };
-        let current_pos = node_ids.iter().position(|x| *x == init_message.node_id).unwrap();
-        let copy = node_ids.clone(); // this is unpleasant, but i'm not sure how else to do it
-        /*
-        we are taking the next nodes_to_notify_count nodes in order.
-        at first i was just taking any nodes_to_notify_count nodes randomly, but in that case it is possible for a node to be no one's neighbour.
-        and this way we can guarantee that all nodes are someone's neighbours.
-        i would like the nodes that we take to be shuffled, and collecting them into a hashmap kind of takes care of that
-         */
-        let neighbours = node_ids.into_iter()
-            .chain(copy.into_iter())
-            .skip(current_pos + 1)
-            .take(nodes_to_notify_count)
-            .map(|node| (node, HashSet::new()))
-            .collect();
-        // todo: find better topologies
-        Self {
-            id: Default::default(),
-            node_id: init_message.node_id,
-            messages: RwLock::new(HashSet::new()),
-            neighbours: RwLock::new(neighbours),
-        }
-    }
-
     fn process_message(&self, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Broadcast(message) => {
@@ -165,13 +156,6 @@ impl AsyncService<InputMessage> for BroadcastService {
                     msg_id: self.id.next(),
                     in_reply_to: message.msg_id,
                     messages: messages,
-                };
-                output_reply(output, meta);
-            },
-            InputMessage::Topology(message) => {
-                let output = TopologyOkMessage {
-                    msg_id: self.id.next(),
-                    in_reply_to: message.msg_id,
                 };
                 output_reply(output, meta);
             },
@@ -231,6 +215,13 @@ impl AsyncService<InputMessage> for BroadcastService {
     }
 }
 
+fn get_topology_message(id: &MessageIdGenerator) -> Option<TopologyMessage> {
+    let Message {meta, body} = wait_until_message::<TopologyMessage>()?;
+    let reply = TopologyOkMessage { msg_id: id.next(), in_reply_to: body.msg_id };
+    output_reply(reply, meta);
+    Some(body)
+}
+
 #[tokio::main]
 async fn main() {
     // cargo build --release && ./maelstrom/maelstrom test -w broadcast --bin ./target/release/broadcast --node-count 1 --time-limit 20 --rate 10
@@ -247,5 +238,14 @@ async fn main() {
 {"src": "n3", "dest": "n1", "body": {"type": "sync_ok", "msg_id": 6, "in_reply_to": 5, "messages": [2000]}}
 
      */
-    async_loop::<BroadcastService, InputMessage>(400, 600).await;
+    let Some(init_message) = get_init_message() else {
+        return;
+    };
+    let id_generator = MessageIdGenerator::default();
+    let Some(topology_message) = get_topology_message(&id_generator) else {
+        return;
+    };
+    let service = BroadcastService::new(id_generator, init_message, topology_message);
+
+    async_loop_with_timeout(Arc::new(service), 100..=150).await;
 }
