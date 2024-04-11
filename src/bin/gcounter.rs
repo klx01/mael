@@ -66,7 +66,7 @@ struct GCounterService {
     id: MessageIdGenerator,
     node_id: String,
     counter: usize,
-    processed_adds: HashSet<usize>,
+    processed_adds: HashSet<String>, // this grows indefinitely; maybe we could somehow periodically discard the old ones
     other_counters: HashMap<String, usize>,
 }
 impl SyncService<InputMessage> for GCounterService {
@@ -77,8 +77,8 @@ impl SyncService<InputMessage> for GCounterService {
             .filter(|x| *x != init_message.node_id)
             .map(|x| (x, 0))
             .collect();
-        Self { 
-            id: Default::default(), 
+        Self {
+            id: Default::default(),
             node_id: init_message.node_id,
             counter: 0,
             processed_adds: HashSet::new(),
@@ -89,7 +89,8 @@ impl SyncService<InputMessage> for GCounterService {
     fn process_message(&mut self, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Add(message) => {
-                let is_new = self.processed_adds.insert(message.msg_id);
+                let message_id = format!("{}_{}", meta.src.clone(), message.msg_id);
+                let is_new = self.processed_adds.insert(message_id);
                 if is_new {
                     self.counter += message.delta;
                 }
@@ -125,19 +126,19 @@ impl SyncService<InputMessage> for GCounterService {
     }
 
     fn on_timeout(&mut self) {
-        let write_message = Message { 
+        let write_message = Message {
             meta: MessageMeta {
                 id: None,
                 src: self.node_id.clone(),
                 dest: KV_NODE_NAME.to_string(),
-            }, 
+            },
             body: KVWriteMessage {
                 key: self.node_id.clone(),
                 value: self.counter,
-            } 
+            }
         };
         output_message(write_message);
-        
+
         for node in self.other_counters.keys() {
             let write_message = Message {
                 meta: MessageMeta {

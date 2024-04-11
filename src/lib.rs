@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use serde_repr::Serialize_repr;
 use tokio::io::AsyncBufReadExt;
 use tokio::select;
 use tokio::time::Instant;
@@ -35,6 +36,27 @@ pub struct InitMessage {
 #[serde(rename = "init_ok")]
 struct InitOkMessage {
     in_reply_to: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "error")]
+pub struct ErrorMessage {
+    pub in_reply_to: usize,
+    pub code: ErrorCode,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize_repr, Copy, Clone)]
+#[repr(u8)]
+pub enum ErrorCode {
+    Timeout = 0,
+    MalformedRequest = 12,
+    Crash = 13,
+    Abort = 14,
+    KeyDoesNotExist = 20,
+    PreconditionFailed = 22,
+    TxnConflict = 30,
 }
 
 pub struct MessageIdGenerator {
@@ -85,7 +107,7 @@ pub fn output_message<B: Serialize>(message: Message<B>) {
     let message = serde_json::to_string(&message).expect("failed to serialize to json");
     let guard = OUT_MUTEX.lock().expect("got a poisoned lock, cant really handle it");
     println!("{message}");
-    drop(guard); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop 
+    drop(guard); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
 }
 
 pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(timeout_from: u64, timeout_to: u64) {
@@ -103,7 +125,7 @@ pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a>>(timeout_
         (timeout_from, timeout_to)
     } else {
         (1000000, 1000000)
-    }; 
+    };
     let service = Arc::new(T::new(body));
 
     let tokio_stdin = tokio::io::stdin();
@@ -162,7 +184,7 @@ pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(timeout_from: u1
             tx.send(line).unwrap()
         }
     });
-    
+
     let mut timeout = rand::thread_rng().gen_range(timeout_from..=timeout_to);
 
     let mut last_timeout_ts = time::Instant::now();

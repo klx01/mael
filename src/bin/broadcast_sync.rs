@@ -78,6 +78,13 @@ struct BroadcastService {
     node_id: String,
     messages: HashSet<usize>,
     neighbours: HashMap<String, HashSet<usize>>,
+    /*
+    messages and neighbours grow indefinitely.
+    there is nothing we can do about messages, due to the nature of the task,
+    but neighbours can be compacted. 
+    we can periodically extract messages that are known to all neighbours into a one separate set.
+    and in can also be compacted together with current node's messages
+     */
 }
 impl BroadcastService {
     fn add_to_known_for_neighbour(&mut self, neighbour: &String, messages: &HashSet<usize>) -> bool {
@@ -108,6 +115,7 @@ impl SyncService<InputMessage> for BroadcastService {
             .take(nodes_to_notify_count)
             .map(|node| (node, HashSet::new()))
             .collect();
+        // todo: find better topologies
         Self {
             id: Default::default(),
             node_id: init_message.node_id,
@@ -161,7 +169,7 @@ impl SyncService<InputMessage> for BroadcastService {
 
     fn on_timeout(&mut self) {
         for (neighbour, confirmed_messages) in self.neighbours.iter() {
-            let to_send_messages = self.messages.difference(confirmed_messages).map(|x| *x).collect::<HashSet<_>>();
+            let to_send_messages = self.messages.difference(confirmed_messages).copied().collect::<HashSet<_>>();
             if to_send_messages.len() == 0 {
                 continue;
             }

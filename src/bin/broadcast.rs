@@ -79,6 +79,13 @@ struct BroadcastService {
     node_id: String,
     messages: RwLock<HashSet<usize>>,
     neighbours: RwLock<HashMap<String, HashSet<usize>>>,
+    /*
+    messages and neighbours grow indefinitely.
+    there is nothing we can do about messages, due to the nature of the task,
+    but neighbours can be compacted. 
+    we can periodically extract messages that are known to all neighbours into a one separate set.
+    and in can also be compacted together with current node's messages
+     */
 }
 impl BroadcastService {
     fn copy_messages(&self) -> HashSet<usize> {
@@ -130,6 +137,7 @@ impl AsyncService<InputMessage> for BroadcastService {
             .take(nodes_to_notify_count)
             .map(|node| (node, HashSet::new()))
             .collect();
+        // todo: find better topologies
         Self {
             id: Default::default(),
             node_id: init_message.node_id,
@@ -201,7 +209,7 @@ impl AsyncService<InputMessage> for BroadcastService {
             so i've only left the output inside the spawn. Is there even any point in that?
             not sure. But it can block, so i guess there might be some point
              */
-            let to_send_messages = messages.difference(confirmed_messages).map(|x| *x).collect::<HashSet<_>>();
+            let to_send_messages = messages.difference(confirmed_messages).copied().collect::<HashSet<_>>();
             if to_send_messages.len() == 0 {
                 continue;
             }
