@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, Message, output_message, DefaultInitService, default_init_and_sync_loop_with_timeout};
+use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, Message, output_message, DefaultInitService, default_init_and_sync_loop};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -175,5 +175,5 @@ fn main() {
 {"id":8,"src":"seq-kv","dest":"n1","body":{"type":"write_ok","msg_id":105}}
 
      */
-    default_init_and_sync_loop_with_timeout::<GCounterService, InputMessage>(400..=600);
+    default_init_and_sync_loop::<GCounterService, InputMessage>(Some(400..=600));
 }

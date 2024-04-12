@@ -1,13 +1,13 @@
 use std::{io, thread, time};
 use std::ops::RangeInclusive;
-use std::sync::{Arc, mpsc, Mutex};
+use std::sync::{Arc, mpsc, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use tokio::io::AsyncBufReadExt;
-use tokio::select;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 #[derive(Serialize, Deserialize)]
@@ -112,47 +112,71 @@ pub fn output_message<B: Serialize>(message: Message<B>) {
     drop(guard); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
 }
 
-pub async fn async_loop_with_timeout<T: AsyncService<M>, M: for<'a> Deserialize<'a> + Send>(service: Arc<T>, timeout_range: RangeInclusive<u64>) {
-    assert!(!timeout_range.is_empty());
-    let tokio_stdin = tokio::io::stdin();
-    let reader = tokio::io::BufReader::new(tokio_stdin);
-    let mut lines = reader.lines();
-    let timeout = rand::thread_rng().gen_range(timeout_range.clone());
-    let stub_duration = Duration::from_millis(1000);
-    let mut interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
-    loop {
-        select! {
-            line = lines.next_line() => {
-                let Ok(line) = line else {
-                    eprintln!("error reading init from stdin: {}", line.err().unwrap());
-                    continue;
-                };
-                let Some(line) = line else {
+pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a> + Send>(service: Arc<T>, timeout_range: Option<RangeInclusive<u64>>) {
+    let is_finished = Arc::new(RwLock::new(false));
+
+    let mut join_set = JoinSet::new();
+    if let Some(timeout_range) = timeout_range {
+        assert!(!timeout_range.is_empty());
+        let service = service.clone();
+        let is_finished = is_finished.clone();
+        join_set.spawn(async move {
+            let stub_duration = Duration::from_millis(1000);
+            loop {
+                let timeout = rand::thread_rng().gen_range(timeout_range.clone());
+                let mut interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
+                interval.tick().await;
+
+                let lock = is_finished.read().expect("got a poisoned lock, cant really handle it");
+                let is_finished = *lock;
+                drop(lock);
+                if is_finished {
                     break;
-                };
-                let service = service.clone();
-                tokio::spawn(async move {
-                    let message = serde_json::from_str::<Message<M>>(&line);
-                    match message {
-                        Ok(message) => service.process_message(message.body, message.meta).await,
-                        Err(err) => eprintln!("error decoding message: {err} {line}"),
-                    };
-                });
-            }
-            _ = interval.tick() => {
+                }
+
                 let service = service.clone();
                 tokio::spawn(async move {
                     service.on_timeout().await;
                 });
-                let timeout = rand::thread_rng().gen_range(timeout_range.clone());
-                interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
             }
+        });
+    }
+
+    let tokio_stdin = tokio::io::stdin();
+    let reader = tokio::io::BufReader::new(tokio_stdin);
+    let mut lines = reader.lines();
+    join_set.spawn(async move {
+        loop {
+            let line = lines.next_line().await;
+            let Ok(line) = line else {
+                eprintln!("error reading init from stdin: {}", line.err().unwrap());
+                continue;
+            };
+            let Some(line) = line else {
+                break;
+            };
+            let service = service.clone();
+            tokio::spawn(async move {
+                let message = serde_json::from_str::<Message<M>>(&line);
+                match message {
+                    Ok(message) => service.process_message(message.body, message.meta).await,
+                    Err(err) => eprintln!("error decoding message: {err} {line}"),
+                };
+            });
+        }
+        let mut lock = is_finished.write().expect("got a poisoned lock, cant really handle it");
+        *lock = true;
+        drop(lock);
+    });
+
+    while let Some(res) = join_set.join_next().await {
+        if let Err(err) = res {
+            eprintln!("error joining task {err}");
         }
     }
 }
 
-pub fn sync_loop_with_timeout<T: SyncService<M>, M: for<'a> Deserialize<'a>>(service: &mut T, timeout_range: RangeInclusive<u128>) {
-    assert!(!timeout_range.is_empty());
+pub fn sync_loop<T: SyncService<M>, M: for<'a> Deserialize<'a>>(service: &mut T, timeout_range: Option<RangeInclusive<u128>>) {
     let (tx, rx) = mpsc::channel();
     let stdin = io::stdin();
     let input_thread = thread::spawn(move || {
@@ -161,42 +185,42 @@ pub fn sync_loop_with_timeout<T: SyncService<M>, M: for<'a> Deserialize<'a>>(ser
         }
     });
 
-    let mut timeout = rand::thread_rng().gen_range(timeout_range.clone());
-    let mut last_timeout_ts = time::Instant::now();
-    loop {
-        let now = time::Instant::now();
-        let time_spent = (now - last_timeout_ts).as_millis();
-        if time_spent > timeout {
-            service.on_timeout();
-            last_timeout_ts = now;
-            timeout = rand::thread_rng().gen_range(timeout_range.clone());
-        } else {
-            let message = rx.recv_timeout(Duration::from_millis((timeout - time_spent) as u64));
-            let message = match message {
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Ok(message) => message,
-            };
+    if let Some(timeout_range) = timeout_range {
+        assert!(!timeout_range.is_empty());
+        let mut timeout = rand::thread_rng().gen_range(timeout_range.clone());
+        let mut last_timeout_ts = time::Instant::now();
+        loop {
+            let now = time::Instant::now();
+            let time_spent = (now - last_timeout_ts).as_millis();
+            if time_spent > timeout {
+                service.on_timeout();
+                last_timeout_ts = now;
+                timeout = rand::thread_rng().gen_range(timeout_range.clone());
+            } else {
+                let message = rx.recv_timeout(Duration::from_millis((timeout - time_spent) as u64));
+                let message = match message {
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Ok(message) => message,
+                };
+                match parse_line(message) {
+                    Some(message) => service.process_message(message.body, message.meta),
+                    None => (),
+                }
+            }
+        }
+
+        service.on_timeout();
+        let thread_result = input_thread.join();
+        if let Err(_) = thread_result {
+            eprintln!("input thread error");
+        }
+    } else {
+        for message in rx {
             match parse_line(message) {
                 Some(message) => service.process_message(message.body, message.meta),
                 None => (),
             }
-        }
-    }
-
-    service.on_timeout();
-    let thread_result = input_thread.join();
-    if let Err(_) = thread_result {
-        eprintln!("input thread error");
-    }
-}
-
-pub fn sync_loop_simple<T: SyncService<M>, M: for<'a> Deserialize<'a>>(service: &mut T) {
-    let stdin = io::stdin();
-    for line in stdin.lines() {
-        match parse_line(line) {
-            Some(message) => service.process_message(message.body, message.meta),
-            None => (),
         }
     }
 }
@@ -207,26 +231,19 @@ pub fn default_init_service<T: DefaultInitService>() -> Option<T> {
     Some(service)
 }
 
-pub async fn default_init_and_async_loop<T: AsyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a> + Send>(timeout: RangeInclusive<u64>) {
+pub async fn default_init_and_async_loop<T: AsyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a> + Send>(timeout: Option<RangeInclusive<u64>>) {
     let Some(service) = default_init_service::<T>() else {
         return;
     };
     let service_arc = Arc::new(service);
-    async_loop_with_timeout(service_arc, timeout).await
+    async_loop(service_arc, timeout).await
 }
 
-pub fn default_init_and_sync_loop_with_timeout<T: SyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a>>(timeout: RangeInclusive<u128>) {
+pub fn default_init_and_sync_loop<T: SyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a>>(timeout: Option<RangeInclusive<u128>>) {
     let Some(mut service) = default_init_service::<T>() else {
         return;
     };
-    sync_loop_with_timeout(&mut service, timeout);
-}
-
-pub fn default_init_and_sync_loop_simple<T: SyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a>>() {
-    let Some(mut service) = default_init_service::<T>() else {
-        return;
-    };
-    sync_loop_simple(&mut service);
+    sync_loop(&mut service, timeout);
 }
 
 pub fn get_init_message() -> Option<InitMessage> {
@@ -261,8 +278,4 @@ fn parse_line<M: for<'a> Deserialize<'a>>(line: Result<String, io::Error>) -> Op
         return None;
     };
     return Some(message);
-}
-
-pub fn get_stub_timeout() -> RangeInclusive<u64> {
-    100000..=100000
 }

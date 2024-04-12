@@ -2,7 +2,7 @@ use std::cmp;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, MessageMeta, output_reply, InitMessage, ErrorMessage, ErrorCode, DefaultInitService, default_init_and_async_loop, get_stub_timeout, AsyncService};
+use mael::{MessageIdGenerator, MessageMeta, output_reply, InitMessage, ErrorMessage, ErrorCode, DefaultInitService, default_init_and_async_loop, AsyncService};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -291,5 +291,5 @@ async fn main() {
 {"id":13,"src":"c3","dest":"n1","body":{"type":"list_committed_offsets","msg_id":110,"keys":["k1"]}}
 
      */
-    default_init_and_async_loop::<KafkaService, InputMessage>(get_stub_timeout()).await;
+    default_init_and_async_loop::<KafkaService, InputMessage>(None).await;
 }

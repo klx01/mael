@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, Message, output_message, get_init_message, wait_until_message, sync_loop_with_timeout};
+use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, Message, output_message, get_init_message, wait_until_message, sync_loop};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -204,5 +204,5 @@ fn main() {
     };
     let mut service = BroadcastService::new(id_generator, init_message, topology_message);
 
-    sync_loop_with_timeout(&mut service, 100..=150);
+    sync_loop(&mut service, Some(100..=150));
 }

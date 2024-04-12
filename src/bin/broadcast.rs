@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, Message, output_message, get_init_message, async_loop_with_timeout, wait_until_message};
+use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, Message, output_message, get_init_message, async_loop, wait_until_message};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -247,5 +247,5 @@ async fn main() {
     };
     let service = BroadcastService::new(id_generator, init_message, topology_message);
 
-    async_loop_with_timeout(Arc::new(service), 100..=150).await;
+    async_loop(Arc::new(service), Some(100..=150)).await;
 }

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, get_stub_timeout, DefaultInitService, default_init_and_async_loop};
+use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, DefaultInitService, default_init_and_async_loop};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -50,5 +50,5 @@ async fn main() {
 {"src": "c1", "dest": "n1", "body": {"type": "generate", "msg_id": 2}}
 
      */
-    default_init_and_async_loop::<UniqService, GenerateMessage>(get_stub_timeout()).await
+    default_init_and_async_loop::<UniqService, GenerateMessage>(None).await
 }
