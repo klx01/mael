@@ -141,43 +141,43 @@ impl BroadcastService {
     }
 }
 impl AsyncService<InputMessage> for BroadcastService {
-    async fn process_message(&self, message: InputMessage, meta: MessageMeta) {
+    async fn process_message(arc_self: Arc<Self>, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Broadcast(message) => {
-                let mut lock = self.messages.write().expect("got a poisoned lock, cant really handle it");
+                let mut lock = arc_self.messages.write().expect("got a poisoned lock, cant really handle it");
                 lock.insert(message.message);
                 drop(lock);
 
                 let output = BroadcastOkMessage {
-                    msg_id: self.id.next(),
+                    msg_id: arc_self.id.next(),
                     in_reply_to: message.msg_id,
                 };
                 output_reply(output, meta);
             },
             InputMessage::Read(message) => {
-                let messages = self.copy_messages();
+                let messages = arc_self.copy_messages();
                 let output = ReadOkMessage {
-                    msg_id: self.id.next(),
+                    msg_id: arc_self.id.next(),
                     in_reply_to: message.msg_id,
                     messages: messages,
                 };
                 output_reply(output, meta);
             },
             InputMessage::Sync(message) => {
-                let mut lock = self.messages.write().expect("got a poisoned lock, cant really handle it");
+                let mut lock = arc_self.messages.write().expect("got a poisoned lock, cant really handle it");
                 lock.extend(&message.messages);
                 drop(lock);
 
-                self.add_to_known_for_neighbour(&meta.src, &message.messages);
+                arc_self.add_to_known_for_neighbour(&meta.src, &message.messages);
                 let output = SyncOkMessage {
-                    msg_id: self.id.next(),
+                    msg_id: arc_self.id.next(),
                     in_reply_to: message.msg_id,
                     messages: message.messages,
                 };
                 output_reply(output, meta);
             }
             InputMessage::SyncOk(message) => {
-                if !self.add_to_known_for_neighbour(&meta.src, &message.messages) {
+                if !arc_self.add_to_known_for_neighbour(&meta.src, &message.messages) {
                     panic!("got a sync ok response from an unknown neighbour");
                 }
             }

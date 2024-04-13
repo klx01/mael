@@ -309,13 +309,38 @@ impl KafkaService {
             update_info_option = state.1;
         }
     }
+    async fn sync_keys(arc_self: Arc<Self>, store_keys: bool) {
+        let state = arc_self.get_keys_state().await;
+        let Some(state) = state else {
+            return;
+        };
+        let (keys_to_update, update_info) = state;
+
+        let mut join_set = JoinSet::new();
+        if store_keys {
+            let arc_self = arc_self.clone();
+            join_set.spawn(async move {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(REQUEST_TIMEOUT_MILLI),
+                    arc_self.store_keys_state(update_info),
+                ).await;
+            });
+        }
+        for key in keys_to_update {
+            let arc_self = arc_self.clone();
+            join_set.spawn(async move {
+                arc_self.refresh_messages_in_key_safe(&key).await;
+            });
+        }
+        join_all(join_set).await;
+    }
 }
 impl AsyncService<InputMessage> for KafkaService {
-    async fn process_message(&self, message: InputMessage, meta: MessageMeta) {
+    async fn process_message(arc_self: Arc<Self>, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Send(message) => {
                 let offset = Self::await_with_timeout(
-                    self.append_message_to_key(&message.key, message.msg),
+                    arc_self.append_message_to_key(&message.key, message.msg),
                     message.msg_id,
                     &meta,
                 ).await;
@@ -323,14 +348,38 @@ impl AsyncService<InputMessage> for KafkaService {
                     return;
                 };
                 let output = SendOkMessage {
-                    msg_id: self.id.next(),
+                    msg_id: arc_self.id.next(),
                     in_reply_to: message.msg_id,
                     offset,
                 };
                 output_reply(output, meta);
             }
             InputMessage::Poll(message) => {
-                let lock = self.messages.read().expect("got a poisoned lock, cant really handle it");
+                /*
+                baseline with timeout 400-600:
+                    server msgs-per-op 2.653712
+                    lag 0.795721333
+                with additional sync here and same timeout:
+                    server msgs-per-op 3.5643966
+                    lag 0.543353709
+                with reads for all requested keys in poll
+                    msgs-per-op 3.5553954
+                    lag 0.0
+                    and a few failures. poll ok-count 7520, info-count 9; send ok-count 7045, info-count 3
+                    :info-txn-causes (:net-timeout)
+                 */
+                //Self::sync_keys(arc_self.clone(), false).await;
+                /*let mut join_set = JoinSet::new();
+                for key in message.offsets.keys() {
+                    let key = key.clone();
+                    let arc_self = arc_self.clone();
+                    join_set.spawn(async move {
+                        arc_self.refresh_messages_in_key(&key).await;
+                    });
+                }
+                join_all(join_set).await;*/
+
+                let lock = arc_self.messages.read().expect("got a poisoned lock, cant really handle it");
                 let mut response = HashMap::new();
                 for (key, offset) in message.offsets {
                     let log = lock.get(&key);
@@ -353,14 +402,14 @@ impl AsyncService<InputMessage> for KafkaService {
                 drop(lock);
 
                 let output = PollOkMessage {
-                    msg_id: self.id.next(),
+                    msg_id: arc_self.id.next(),
                     in_reply_to: message.msg_id,
                     msgs: response,
                 };
                 output_reply(output, meta);
             }
             InputMessage::CommitOffsets(message) => {
-                let key_lengths = self.copy_lengths();
+                let key_lengths = arc_self.copy_lengths();
                 for (key, offset) in message.offsets.iter() {
                     let length = key_lengths.get(key);
                     let Some(length) = length else {
@@ -384,7 +433,7 @@ impl AsyncService<InputMessage> for KafkaService {
                 }
 
                 let result = Self::await_with_timeout(
-                    self.commit_offsets(message.offsets),
+                    arc_self.commit_offsets(message.offsets),
                     message.msg_id,
                     &meta,
                 ).await;
@@ -393,14 +442,14 @@ impl AsyncService<InputMessage> for KafkaService {
                 };
 
                 let output = CommitOffsetsOkMessage {
-                    msg_id: self.id.next(),
+                    msg_id: arc_self.id.next(),
                     in_reply_to: message.msg_id,
                 };
                 output_reply(output, meta);
             }
             InputMessage::ListCommittedOffsets(message) => {
                 let offsets = Self::await_with_timeout(
-                    self.read_committed_offsets(),
+                    arc_self.read_committed_offsets(),
                     message.msg_id,
                     &meta,
                 ).await;
@@ -428,42 +477,20 @@ impl AsyncService<InputMessage> for KafkaService {
                 }
 
                 let output = ListCommittedOffsetsOkMessage {
-                    msg_id: self.id.next(),
+                    msg_id: arc_self.id.next(),
                     in_reply_to: message.msg_id,
                     offsets: response,
                 };
                 output_reply(output, meta);
             }
             InputMessage::Response(reply) => {
-                self.kv.init_response(reply.in_reply_to, reply.data);
+                arc_self.kv.init_response(reply.in_reply_to, reply.data);
             }
         }
     }
 
     async fn on_timeout(arc_self: Arc<Self>) {
-        let state = arc_self.get_keys_state().await;
-        let Some(state) = state else {
-            return;
-        };
-        let (keys_to_update, update_info) = state;
-        
-        let mut join_set = JoinSet::new();
-        {
-            let arc_self = arc_self.clone();
-            join_set.spawn(async move {
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(REQUEST_TIMEOUT_MILLI),
-                    arc_self.store_keys_state(update_info),
-                ).await;
-            });   
-        }
-        for key in keys_to_update {
-            let arc_self = arc_self.clone();
-            join_set.spawn(async move {
-                arc_self.refresh_messages_in_key_safe(&key).await;
-            });
-        }
-        join_all(join_set).await;
+        Self::sync_keys(arc_self, true).await;
     }
 }
 

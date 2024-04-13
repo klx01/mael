@@ -11,7 +11,7 @@ use crate::messages::{Message, MessageMeta};
 use crate::util::join_all;
 
 pub trait AsyncService<M>: Sync + Send + 'static {
-    fn process_message(&self, message: M, meta: MessageMeta) -> impl std::future::Future<Output = ()> + Send;
+    fn process_message(arc_self: Arc<Self>, message: M, meta: MessageMeta) -> impl std::future::Future<Output = ()> + Send;
     fn on_timeout(arc_self: Arc<Self>) -> impl std::future::Future<Output = ()> + Send;
 }
 
@@ -60,7 +60,7 @@ pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a> + Send>(s
             tokio::spawn(async move {
                 let message = serde_json::from_str::<Message<M>>(&line);
                 match message {
-                    Ok(message) => service.process_message(message.body, message.meta).await,
+                    Ok(message) => T::process_message(service, message.body, message.meta).await,
                     Err(err) => eprintln!("error decoding message: {err} {line}"),
                 };
             });

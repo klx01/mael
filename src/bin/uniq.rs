@@ -32,12 +32,12 @@ impl DefaultInitService for UniqService {
     }
 }
 impl AsyncService<GenerateMessage> for UniqService {
-    async fn process_message(&self, message: GenerateMessage, meta: MessageMeta) {
-        let msg_id = self.id.next();
+    async fn process_message(arc_self: Arc<Self>, message: GenerateMessage, meta: MessageMeta) {
+        let msg_id = arc_self.id.next();
         let output = GenerateOkMessage {
             msg_id: msg_id,
             in_reply_to: message.msg_id,
-            id: format!("{}_{msg_id}", self.node_id),
+            id: format!("{}_{msg_id}", arc_self.node_id),
         };
         output_reply(output, meta);
     }

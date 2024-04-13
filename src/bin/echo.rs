@@ -32,9 +32,9 @@ impl DefaultInitService for EchoService {
     }
 }
 impl AsyncService<EchoMessage> for EchoService {
-    async fn process_message(&self, message: EchoMessage, meta: MessageMeta) {
+    async fn process_message(arc_self: Arc<Self>, message: EchoMessage, meta: MessageMeta) {
         let output = EchoOkMessage {
-            msg_id: self.id.next(),
+            msg_id: arc_self.id.next(),
             in_reply_to: message.msg_id,
             echo: message.echo,
         };
