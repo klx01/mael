@@ -188,8 +188,8 @@ impl AsyncService<InputMessage> for BroadcastService {
         let neighbours = arc_self.copy_neighbours();
         let messages = Arc::new(arc_self.copy_messages());
         for (neighbour, confirmed_messages) in neighbours {
-            let arc_self = arc_self.clone();
-            let messages = messages.clone();
+            let arc_self = Arc::clone(&arc_self);
+            let messages = Arc::clone(&messages);
             tokio::spawn(async move {
                 let to_send_messages = messages.difference(&confirmed_messages).copied().collect::<HashSet<_>>();
                 if to_send_messages.len() == 0 {

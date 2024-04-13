@@ -98,7 +98,7 @@ impl DefaultInitService for KafkaService {
     fn new(init_message: InitMessage) -> Self {
         let id = Arc::new(MessageIdGenerator::new());
         let node_id = init_message.node_id;
-        let kv = LinKV::new(id.clone(), node_id.clone(), REQUEST_TIMEOUT_MILLI);
+        let kv = LinKV::new(Arc::clone(&id), node_id.clone(), REQUEST_TIMEOUT_MILLI);
         Self {
             id: id,
             node_id: node_id,
@@ -318,7 +318,7 @@ impl KafkaService {
 
         let mut join_set = JoinSet::new();
         if store_keys {
-            let arc_self = arc_self.clone();
+            let arc_self = Arc::clone(&arc_self);
             join_set.spawn(async move {
                 let _ = tokio::time::timeout(
                     Duration::from_millis(REQUEST_TIMEOUT_MILLI),
@@ -327,7 +327,7 @@ impl KafkaService {
             });
         }
         for key in keys_to_update {
-            let arc_self = arc_self.clone();
+            let arc_self = Arc::clone(&arc_self);
             join_set.spawn(async move {
                 arc_self.refresh_messages_in_key_safe(&key).await;
             });
@@ -368,11 +368,11 @@ impl AsyncService<InputMessage> for KafkaService {
                     and a few failures. poll ok-count 7520, info-count 9; send ok-count 7045, info-count 3
                     :info-txn-causes (:net-timeout)
                  */
-                //Self::sync_keys(arc_self.clone(), false).await;
+                //Self::sync_keys(Arc::clone(&arc_self), false).await;
                 /*let mut join_set = JoinSet::new();
                 for key in message.offsets.keys() {
                     let key = key.clone();
-                    let arc_self = arc_self.clone();
+                    let arc_self = Arc::clone(&arc_self);
                     join_set.spawn(async move {
                         arc_self.refresh_messages_in_key(&key).await;
                     });

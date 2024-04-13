@@ -21,15 +21,15 @@ pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a> + Send>(s
     let mut join_set = JoinSet::new();
     if let Some(timeout_range) = timeout_range_milli {
         assert!(!timeout_range.is_empty());
-        let service = service.clone();
-        let is_finished = is_finished.clone();
+        let service = Arc::clone(&service);
+        let is_finished = Arc::clone(&is_finished);
         join_set.spawn(async move {
             let stub_duration = Duration::from_millis(1000);
             loop {
                 let timeout = rand::thread_rng().gen_range(timeout_range.clone());
                 let mut interval = tokio::time::interval_at(Instant::now() + Duration::from_millis(timeout), stub_duration);
 
-                T::on_timeout(service.clone()).await;
+                T::on_timeout(Arc::clone(&service)).await;
 
                 interval.tick().await;
 
@@ -56,7 +56,7 @@ pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a> + Send>(s
             let Some(line) = line else {
                 break;
             };
-            let service = service.clone();
+            let service = Arc::clone(&service);
             tokio::spawn(async move {
                 let message = serde_json::from_str::<Message<M>>(&line);
                 match message {
