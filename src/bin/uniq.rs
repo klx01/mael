@@ -1,5 +1,10 @@
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, DefaultInitService, default_init_and_async_loop};
+use mael::async_service::{AsyncService, default_init_and_async_loop};
+use mael::id_generator::MessageIdGenerator;
+use mael::init::DefaultInitService;
+use mael::messages::{InitMessage, MessageMeta};
+use mael::output::output_reply;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -37,7 +42,7 @@ impl AsyncService<GenerateMessage> for UniqService {
         output_reply(output, meta);
     }
 
-    async fn on_timeout(&self) {
+    async fn on_timeout(_arc_self: Arc<Self>) {
         // empty
     }
 }

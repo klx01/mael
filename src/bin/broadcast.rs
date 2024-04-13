@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, AsyncService, MessageMeta, output_reply, InitMessage, Message, output_message, get_init_message, async_loop, wait_until_message};
+use mael::async_service::{async_loop, AsyncService};
+use mael::id_generator::MessageIdGenerator;
+use mael::init::{get_init_message, wait_until_message};
+use mael::messages::{InitMessage, Message, MessageMeta};
+use mael::output::{output_message, output_reply};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -180,35 +184,28 @@ impl AsyncService<InputMessage> for BroadcastService {
         }
     }
 
-    async fn on_timeout(&self) {
-        let neighbours = self.copy_neighbours();
-        let messages = self.copy_messages();
-        for (neighbour, confirmed_messages) in neighbours.iter() {
-            /*
-            i would want to move the whole body of this loop into the async spawn
-            but i can't, because it references self.
-            i could extract those references outside, but that would mean incrementing the ids when we don't send messages
-            every 100ms by the amount of neighbours. And i don't really like that.
-            or maybe refactor it in a way that could use the Arc?
-            so i've only left the output inside the spawn. Is there even any point in that?
-            not sure. But it can block, so i guess there might be some point
-             */
-            let to_send_messages = messages.difference(confirmed_messages).copied().collect::<HashSet<_>>();
-            if to_send_messages.len() == 0 {
-                continue;
-            }
-            let message = Message {
-                meta: MessageMeta {
-                    id: None,
-                    src: self.node_id.clone(),
-                    dest: neighbour.clone(),
-                },
-                body: SyncMessage {
-                    msg_id: self.id.next(),
-                    messages: to_send_messages,
-                },
-            };
+    async fn on_timeout(arc_self: Arc<Self>) {
+        let neighbours = arc_self.copy_neighbours();
+        let messages = Arc::new(arc_self.copy_messages());
+        for (neighbour, confirmed_messages) in neighbours {
+            let arc_self = arc_self.clone();
+            let messages = messages.clone();
             tokio::spawn(async move {
+                let to_send_messages = messages.difference(&confirmed_messages).copied().collect::<HashSet<_>>();
+                if to_send_messages.len() == 0 {
+                    return;
+                }
+                let message = Message {
+                    meta: MessageMeta {
+                        id: None,
+                        src: arc_self.node_id.clone(),
+                        dest: neighbour.clone(),
+                    },
+                    body: SyncMessage {
+                        msg_id: arc_self.id.next(),
+                        messages: to_send_messages,
+                    },
+                };
                 output_message(message);
             });
         }

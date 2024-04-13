@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
-use mael::{MessageIdGenerator, SyncService, MessageMeta, output_reply, InitMessage, Message, output_message, DefaultInitService, default_init_and_sync_loop};
+use mael::sync_service::{SyncService, default_init_and_sync_loop};
+use mael::id_generator::MessageIdGenerator;
+use mael::init::DefaultInitService;
+use mael::messages::{InitMessage, Message, MessageMeta};
+use mael::output::{output_message, output_reply};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
