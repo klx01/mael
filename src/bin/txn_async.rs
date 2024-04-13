@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
-use mael::sync_service::{SyncService, default_init_and_sync_loop};
+use mael::async_service::{AsyncService, default_init_and_async_loop};
 use mael::id_generator::MessageIdGenerator;
 use mael::init::DefaultInitService;
 use mael::messages::{ErrorCode, ErrorMessage, InitMessage, MessageMeta};
@@ -27,7 +28,7 @@ struct TxnOkMessage {
 struct TxnService {
     id: MessageIdGenerator,
     node_id: String,
-    storage: HashMap<usize, usize>,
+    storage: Mutex<HashMap<usize, usize>>,
 }
 impl DefaultInitService for TxnService {
     fn new(init_message: InitMessage) -> Self {
@@ -38,19 +39,22 @@ impl DefaultInitService for TxnService {
         }
     }
 }
-impl SyncService<TxnMessage> for TxnService {
-    fn process_message(&mut self, mut message: TxnMessage, meta: MessageMeta) {
+impl AsyncService<TxnMessage> for TxnService {
+    async fn process_message(arc_self: Arc<Self>, mut message: TxnMessage, meta: MessageMeta) {
+        // todo: try to implement this without having a global mutex for the whole transaction
+        let mut storage = arc_self.storage.lock().expect("got a poisoned lock, cant really handle it");
         for stmt in message.txn.iter_mut() {
             let Statement(action, key, value) = stmt;
             match action {
                 'r' => {
-                    *value = self.storage.get(key).copied();
+                    *value = storage.get(key).copied();
                 },
                 'w' => match value {
                     Some(value) => {
-                        self.storage.insert(*key, *value);
+                        storage.insert(*key, *value);
                     },
                     None => {
+                        drop(storage);
                         let error = ErrorMessage {
                             in_reply_to: message.msg_id,
                             code: ErrorCode::MalformedRequest,
@@ -61,6 +65,7 @@ impl SyncService<TxnMessage> for TxnService {
                     },
                 },
                 _ => {
+                    drop(storage);
                     let error = ErrorMessage {
                         in_reply_to: message.msg_id,
                         code: ErrorCode::MalformedRequest,
@@ -71,28 +76,31 @@ impl SyncService<TxnMessage> for TxnService {
                 },
             }
         }
+        drop(storage);
+        
         let output = TxnOkMessage {
-            msg_id: self.id.next(),
+            msg_id: arc_self.id.next(),
             in_reply_to: message.msg_id,
             txn: message.txn,
         };
         output_reply(output, meta);
     }
 
-    fn on_timeout(&mut self) {
+    async fn on_timeout(arc_self: Arc<Self>) {
         // empty
     }
 }
 
-fn main() {
-    // cargo build --release && ./maelstrom/maelstrom test -w txn-rw-register --bin ./target/release/txn --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
-    // cargo build --release && ./maelstrom/maelstrom test -w txn-rw-register --bin ./target/release/txn --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
-    // cargo build --release && ./maelstrom/maelstrom test -w txn-rw-register --bin ./target/release/txn --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total –-nemesis partition
-
+#[tokio::main]
+async fn main() {
+    // cargo build --release && ./maelstrom/maelstrom test -w txn-rw-register --bin ./target/release/txn_async --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
+    // cargo build --release && ./maelstrom/maelstrom test -w txn-rw-register --bin ./target/release/txn_async --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
+    // cargo build --release && ./maelstrom/maelstrom test -w txn-rw-register --bin ./target/release/txn_async --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total –-nemesis partition
+    
     /*
     todo:
         6c passes even with this implementation. This is probably not intended, but i'm not sure what is intended
-        looks like it is not even required to replicate the writes between nodes, and it is not required for nodes to eventually end up in the same state
+        looks like it is not even required to replicate the writes between nodes, and it is not required for nodes to eventually end up in the same state  
      */
 
     /*
@@ -100,5 +108,5 @@ fn main() {
 {"id":4,"src":"c3","dest":"n1","body":{"type":"txn","msg_id":101,"txn":[["r", 1, null], ["w", 1, 6], ["w", 2, 9]]}}
 
      */
-    default_init_and_sync_loop::<TxnService, TxnMessage>(None);
+    default_init_and_async_loop::<TxnService, TxnMessage>(None).await;
 }
