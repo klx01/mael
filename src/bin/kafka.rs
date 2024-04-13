@@ -148,8 +148,8 @@ impl KafkaService {
                 let set_success = self.set_messages_for_key(key, messages_in_key);
                 /*
                 it should be impossible for new vec to be smaller than old one.
-                the only way for the vec to grow is to CAS, 
-                so if we were able to CAS, it means that no one else was able to do it  
+                the only way for the vec to grow is to CAS,
+                so if we were able to CAS, it means that no one else was able to do it
                  */
                 assert!(set_success, "this should never fail");
                 return offset;
@@ -220,22 +220,28 @@ impl KafkaService {
     }
     async fn commit_offsets(&self, new_offsets: HashMap<String, usize>) {
         loop {
-            /*
-            we need to CAS the values,
-            so we need to be sure that the old value that we send in CAS request is exactly the same the stored one.
-            hashmaps don't guarantee the order of elements,
-            so if we use read_typed<HashMap>, then we would not be able to make a correct CAS request.
-            so we read and store the value as String, and not as HashMap
-             */
             let read_result = self.read_committed_offsets().await;
             let Some((mut offsets, old_value)) = read_result else {
                 continue;
             };
+            let mut need_save = false;
             for (key, offset) in new_offsets.iter() {
-                let committed = offsets.entry(key.clone()).or_insert(0);
-                if *offset >= *committed {
-                    *committed = *offset;
+                let committed = offsets.get_mut(key);
+                match committed {
+                    Some(committed) => {
+                        if *offset > *committed {
+                            *committed = *offset;
+                            need_save = true;
+                        }
+                    },
+                    None => {
+                        need_save = true;
+                        offsets.entry(key.clone()).or_insert(*offset);
+                    },
                 }
+            }
+            if !need_save {
+                return;
             }
             let save_success = self.kv.cas_hash_map(Self::get_store_key_committed(), old_value, offsets, true).await;
             if save_success {
@@ -270,12 +276,12 @@ impl KafkaService {
                 need_save = true;
             }
         }
-         
+
         if need_save {
             let save_success = self.kv.cas_hash_map(Self::get_store_key_keys(), old_value, node_key_lengths, true).await;
             if !save_success {
                 return None;
-            }   
+            }
         }
         Some(to_sync_keys)
     }
