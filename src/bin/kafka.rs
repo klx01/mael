@@ -339,6 +339,13 @@ impl AsyncService<InputMessage> for KafkaService {
     async fn process_message(arc_self: Arc<Self>, message: InputMessage, meta: MessageMeta) {
         match message {
             InputMessage::Send(message) => {
+                /*
+                todo: correctly handle repeated incoming send messages
+                    i.e. cache the msg_id-s and return cached responses 
+                
+                todo: correctly handle dropped cas_ok responses
+                    i.e. store the msg_id-s of completed requests, check if id is already present before trying to append  
+                 */
                 let offset = Self::await_with_timeout(
                     arc_self.append_message_to_key(&message.key, message.msg),
                     message.msg_id,
@@ -367,6 +374,7 @@ impl AsyncService<InputMessage> for KafkaService {
                     lag 0.0
                     and a few failures. poll ok-count 7520, info-count 9; send ok-count 7045, info-count 3
                     :info-txn-causes (:net-timeout)
+                    todo: check why it fails
                  */
                 //Self::sync_keys(Arc::clone(&arc_self), false).await;
                 /*let mut join_set = JoinSet::new();

@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
+/*
+todo: if possible, rewrite the messages in a way that would reduce the amount of cloning
+ */
+
 #[derive(Serialize, Deserialize)]
 pub struct Message<T> {
     #[serde(flatten)]
