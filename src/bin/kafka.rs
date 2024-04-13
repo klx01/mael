@@ -11,6 +11,7 @@ use mael::init::DefaultInitService;
 use mael::keyvalue::{KVResponseMessage, LinKV};
 use mael::messages::{AnyResponseMessage, ErrorCode, ErrorMessage, InitMessage, MessageMeta};
 use mael::output::output_reply;
+use mael::util::join_all;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -193,6 +194,12 @@ impl KafkaService {
         }
         self.refresh_messages_in_key(key).await
     }
+    fn has_key(&self, key: &String) -> bool {
+        let lock = self.messages.read().expect("got a poisoned lock, cant really handle it");
+        let has_key = lock.contains_key(key);
+        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
+        has_key
+    }
     fn set_messages_for_key(&self, key: &String, new_messages: Vec<usize>) -> bool {
         let new_len = new_messages.len();
         let mut lock = self.messages.write().expect("got a poisoned lock, cant really handle it");
@@ -256,7 +263,7 @@ impl KafkaService {
     fn get_store_key_keys() -> String {
         "keys".to_string()
     }
-    async fn sync_keys_list(&self) -> Option<Vec<String>> {
+    async fn get_keys_state(&self) -> Option<(Vec<String>, Option<(String, HashMap<String, usize>)>)> {
         let read_result = self.kv.read_hash_map_for_cas::<usize>(Self::get_store_key_keys()).await;
         let Some((stored_key_lengths, old_value)) = read_result else {
             return None;
@@ -276,20 +283,31 @@ impl KafkaService {
                 need_save = true;
             }
         }
-
-        if need_save {
-            let save_success = self.kv.cas_hash_map(Self::get_store_key_keys(), old_value, node_key_lengths, true).await;
-            if !save_success {
-                return None;
-            }
-        }
-        Some(to_sync_keys)
+        let update_info = if need_save {
+            Some((old_value, node_key_lengths))
+        } else {
+            None
+        };
+        Some((to_sync_keys, update_info))
     }
-    fn has_key(&self, key: &String) -> bool {
-        let lock = self.messages.read().expect("got a poisoned lock, cant really handle it");
-        let has_key = lock.contains_key(key);
-        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
-        has_key
+    async fn store_keys_state(&self, mut update_info_option: Option<(String, HashMap<String, usize>)>) {
+        loop {
+            let Some(update_info) = update_info_option else {
+                // if empty, don't need to update, all info is up-to-date
+                return;
+            };
+            let success = self.kv.cas_hash_map(Self::get_store_key_keys(), update_info.0, update_info.1, true).await;
+            if success {
+                return;
+            }
+            let state = loop {
+                let state = self.get_keys_state().await;
+                if let Some(state) = state {
+                    break state;
+                }
+            };
+            update_info_option = state.1;
+        }
     }
 }
 impl AsyncService<InputMessage> for KafkaService {
@@ -423,22 +441,29 @@ impl AsyncService<InputMessage> for KafkaService {
     }
 
     async fn on_timeout(arc_self: Arc<Self>) {
-        let keys_to_update = arc_self.sync_keys_list().await;
-        let Some(keys_to_update) = keys_to_update else {
+        let state = arc_self.get_keys_state().await;
+        let Some(state) = state else {
             return;
         };
+        let (keys_to_update, update_info) = state;
+        
         let mut join_set = JoinSet::new();
+        {
+            let arc_self = arc_self.clone();
+            join_set.spawn(async move {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(REQUEST_TIMEOUT_MILLI),
+                    arc_self.store_keys_state(update_info),
+                ).await;
+            });   
+        }
         for key in keys_to_update {
             let arc_self = arc_self.clone();
             join_set.spawn(async move {
                 arc_self.refresh_messages_in_key_safe(&key).await;
             });
         }
-        while let Some(res) = join_set.join_next().await {
-            if let Err(err) = res {
-                eprintln!("error joining task {err}");
-            }
-        }
+        join_all(join_set).await;
     }
 }
 

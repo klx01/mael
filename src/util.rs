@@ -3,6 +3,7 @@ use std::io;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::task::JoinSet;
 use crate::messages::Message;
 
 pub fn parse_line<M: for<'a> Deserialize<'a>>(line: Result<String, io::Error>) -> Option<Message<M>> {
@@ -36,4 +37,12 @@ pub fn hash_map_to_json_value<V>(map: HashMap<String, V>) -> Value
         .map(|(k, v)| (k, Value::from(v)))
         .collect(); 
     Value::Object(map)
+}
+
+pub async fn join_all(mut join_set: JoinSet<()>) {
+    while let Some(res) = join_set.join_next().await {
+        if let Err(err) = res {
+            eprintln!("error joining task {err}");
+        }
+    }
 }

@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use crate::init::{default_init_service, DefaultInitService};
 use crate::messages::{Message, MessageMeta};
+use crate::util::join_all;
 
 pub trait AsyncService<M>: Sync + Send + 'static {
     fn process_message(&self, message: M, meta: MessageMeta) -> impl std::future::Future<Output = ()> + Send;
@@ -69,11 +70,7 @@ pub async fn async_loop<T: AsyncService<M>, M: for<'a> Deserialize<'a> + Send>(s
         drop(lock);
     });
 
-    while let Some(res) = join_set.join_next().await {
-        if let Err(err) = res {
-            eprintln!("error joining task {err}");
-        }
-    }
+    join_all(join_set).await;
 }
 
 pub async fn default_init_and_async_loop<T: AsyncService<M> + DefaultInitService, M: for<'a> Deserialize<'a> + Send>(timeout_range_milli: Option<RangeInclusive<u64>>) {
