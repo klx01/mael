@@ -7,77 +7,6 @@ use mael::init::{get_init_message, wait_until_message};
 use mael::messages::{InitMessage, Message, MessageMeta};
 use mael::output::{output_message, output_reply};
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-enum InputMessage {
-    Broadcast(BroadcastMessage),
-    Read(ReadMessage),
-    Sync(SyncMessage),
-    SyncOk(SyncOkMessage),
-}
-
-#[derive(Debug, Deserialize)]
-struct BroadcastMessage {
-    msg_id: usize,
-    message: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "broadcast_ok")]
-struct BroadcastOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReadMessage {
-    msg_id: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "read_ok")]
-struct ReadOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    messages: HashSet<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename = "topology")]
-struct TopologyMessage {
-    msg_id: usize,
-    topology: HashMap<String, Vec<String>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "topology_ok")]
-struct TopologyOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "sync")]
-struct SyncMessage {
-    msg_id: usize,
-    messages: HashSet<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "sync_ok")]
-struct SyncOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    messages: HashSet<usize>,
-}
-
 struct BroadcastService {
     id: MessageIdGenerator,
     node_id: String,
@@ -90,55 +19,6 @@ struct BroadcastService {
     we can periodically extract messages that are known to all neighbours into a one separate set.
     and in can also be compacted together with current node's messages
      */
-}
-impl BroadcastService {
-    fn new(id: MessageIdGenerator, init_message: InitMessage, topology_message: TopologyMessage) -> Self {
-        let node_id = init_message.node_id;
-        let neighbours = Self::extract_neighbours(topology_message, &node_id);
-        Self {
-            id: id,
-            node_id: node_id,
-            messages: RwLock::new(HashSet::new()),
-            neighbours: RwLock::new(neighbours),
-        }
-    }
-    fn extract_neighbours(mut topology_message: TopologyMessage, current_id: &String) -> HashMap<String, HashSet<usize>> {
-        let neighbours = topology_message.topology.remove(current_id).expect("no neighbours for current node in the topology message");
-        let mut neighbours_messages = HashMap::new();
-        for neighbour in neighbours {
-            neighbours_messages.insert(neighbour, HashSet::new());
-        }
-        neighbours_messages
-    }
-    fn copy_messages(&self) -> HashSet<usize> {
-        /*
-        i wonder if it's possible to refactor some usages to remove cloning? does not seem like it is at the moment
-         */
-        let lock = self.messages.read().expect("got a poisoned lock, cant really handle it");
-        let copy = lock.clone();
-        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
-        copy
-    }
-    fn copy_neighbours(&self) -> HashMap<String, HashSet<usize>> {
-        /*
-        i wonder if it's possible to refactor some usages to remove cloning? does not seem like it is at the moment
-         */
-        let lock = self.neighbours.read().expect("got a poisoned lock, cant really handle it");
-        let copy = lock.clone();
-        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
-        copy
-    }
-    fn add_to_known_for_neighbour(&self, neighbour: &String, messages: &HashSet<usize>) -> bool {
-        let mut lock = self.neighbours.write().expect("got a poisoned lock, cant really handle it");
-        let Some(confirmed) = lock.get_mut(neighbour) else {
-            drop(lock);
-            eprintln!("got a message from {neighbour} which is not in the neighbours list");
-            return false;
-        };
-        confirmed.extend(messages);
-        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
-        true
-    }
 }
 impl AsyncService<InputMessage> for BroadcastService {
     async fn process_message(arc_self: Arc<Self>, message: InputMessage, meta: MessageMeta) {
@@ -211,6 +91,55 @@ impl AsyncService<InputMessage> for BroadcastService {
         }
     }
 }
+impl BroadcastService {
+    fn new(id: MessageIdGenerator, init_message: InitMessage, topology_message: TopologyMessage) -> Self {
+        let node_id = init_message.node_id;
+        let neighbours = Self::extract_neighbours(topology_message, &node_id);
+        Self {
+            id: id,
+            node_id: node_id,
+            messages: RwLock::new(HashSet::new()),
+            neighbours: RwLock::new(neighbours),
+        }
+    }
+    fn extract_neighbours(mut topology_message: TopologyMessage, current_id: &String) -> HashMap<String, HashSet<usize>> {
+        let neighbours = topology_message.topology.remove(current_id).expect("no neighbours for current node in the topology message");
+        let mut neighbours_messages = HashMap::new();
+        for neighbour in neighbours {
+            neighbours_messages.insert(neighbour, HashSet::new());
+        }
+        neighbours_messages
+    }
+    fn copy_messages(&self) -> HashSet<usize> {
+        /*
+        i wonder if it's possible to refactor some usages to remove cloning? does not seem like it is at the moment
+         */
+        let lock = self.messages.read().expect("got a poisoned lock, cant really handle it");
+        let copy = lock.clone();
+        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
+        copy
+    }
+    fn copy_neighbours(&self) -> HashMap<String, HashSet<usize>> {
+        /*
+        i wonder if it's possible to refactor some usages to remove cloning? does not seem like it is at the moment
+         */
+        let lock = self.neighbours.read().expect("got a poisoned lock, cant really handle it");
+        let copy = lock.clone();
+        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
+        copy
+    }
+    fn add_to_known_for_neighbour(&self, neighbour: &String, messages: &HashSet<usize>) -> bool {
+        let mut lock = self.neighbours.write().expect("got a poisoned lock, cant really handle it");
+        let Some(confirmed) = lock.get_mut(neighbour) else {
+            drop(lock);
+            eprintln!("got a message from {neighbour} which is not in the neighbours list");
+            return false;
+        };
+        confirmed.extend(messages);
+        drop(lock); // dropping lock guards explicitly to be future-proof. i.e. if i want to add something to the end of the function, i would need make a conscious decision for adding it before or after drop
+        true
+    }
+}
 
 fn get_topology_message(id: &MessageIdGenerator) -> Option<TopologyMessage> {
     let Message {meta, body} = wait_until_message::<TopologyMessage>()?;
@@ -245,4 +174,75 @@ async fn main() {
     let service = BroadcastService::new(id_generator, init_message, topology_message);
 
     async_loop(Arc::new(service), Some(100..=150)).await;
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+enum InputMessage {
+    Broadcast(BroadcastMessage),
+    Read(ReadMessage),
+    Sync(SyncMessage),
+    SyncOk(SyncOkMessage),
+}
+
+#[derive(Debug, Deserialize)]
+struct BroadcastMessage {
+    msg_id: usize,
+    message: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "broadcast_ok")]
+struct BroadcastOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadMessage {
+    msg_id: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "read_ok")]
+struct ReadOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    messages: HashSet<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename = "topology")]
+struct TopologyMessage {
+    msg_id: usize,
+    topology: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "topology_ok")]
+struct TopologyOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "sync")]
+struct SyncMessage {
+    msg_id: usize,
+    messages: HashSet<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "sync_ok")]
+struct SyncOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    messages: HashSet<usize>,
 }

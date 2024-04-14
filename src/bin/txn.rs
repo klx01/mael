@@ -6,37 +6,10 @@ use mael::init::DefaultInitService;
 use mael::messages::{ErrorCode, ErrorMessage, InitMessage, MessageMeta};
 use mael::output::output_reply;
 
-#[derive(Debug, Deserialize)]
-struct TxnMessage {
-    msg_id: usize,
-    txn: Vec<Statement>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Statement(char, usize, Option<usize>);
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "txn_ok")]
-struct TxnOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    txn: Vec<Statement>,
-}
-
 struct TxnService {
     id: MessageIdGenerator,
     node_id: String,
     storage: HashMap<usize, usize>,
-}
-impl DefaultInitService for TxnService {
-    fn new(init_message: InitMessage) -> Self {
-        Self {
-            id: Default::default(),
-            node_id: init_message.node_id,
-            storage: Default::default(),
-        }
-    }
 }
 impl SyncService<TxnMessage> for TxnService {
     fn process_message(&mut self, mut message: TxnMessage, meta: MessageMeta) {
@@ -83,6 +56,15 @@ impl SyncService<TxnMessage> for TxnService {
         // empty
     }
 }
+impl DefaultInitService for TxnService {
+    fn new(init_message: InitMessage) -> Self {
+        Self {
+            id: Default::default(),
+            node_id: init_message.node_id,
+            storage: Default::default(),
+        }
+    }
+}
 
 fn main() {
     // cargo build --release && ./maelstrom/maelstrom test -w txn-rw-register --bin ./target/release/txn --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
@@ -101,4 +83,22 @@ fn main() {
 
      */
     default_init_and_sync_loop::<TxnService, TxnMessage>(None);
+}
+
+#[derive(Debug, Deserialize)]
+struct TxnMessage {
+    msg_id: usize,
+    txn: Vec<Statement>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Statement(char, usize, Option<usize>);
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "txn_ok")]
+struct TxnOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    txn: Vec<Statement>,
 }

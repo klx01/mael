@@ -6,64 +6,6 @@ use mael::init::DefaultInitService;
 use mael::messages::{InitMessage, Message, MessageMeta};
 use mael::output::{output_message, output_reply};
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-enum InputMessage {
-    Add(AddMessage),
-    Read(ReadMessage),
-    Sync(SyncMessage),
-    WriteOk(KVWriteOkMessage),
-}
-
-#[derive(Debug, Deserialize)]
-struct AddMessage {
-    msg_id: usize,
-    delta: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "add_ok")]
-struct AddOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReadMessage {
-    msg_id: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "read_ok")]
-struct ReadOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    value: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename = "sync")]
-struct SyncMessage {
-    value: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "write")]
-struct KVWriteMessage {
-    key: String,
-    value: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct KVWriteOkMessage {
-    // empty
-}
-
 const KV_NODE_NAME: &'static str = "seq-kv";
 
 struct GCounterService {
@@ -79,23 +21,6 @@ struct GCounterService {
     i don't really see what exactly would be improved by making it truly stateless.
     maybe the case where multiple nodes accidentally get the same id?
      */
-}
-impl DefaultInitService for GCounterService {
-    fn new(init_message: InitMessage) -> Self {
-        let other_counters = init_message
-            .node_ids
-            .into_iter()
-            .filter(|x| *x != init_message.node_id)
-            .map(|x| (x, 0))
-            .collect();
-        Self {
-            id: Default::default(),
-            node_id: init_message.node_id,
-            counter: 0,
-            processed_adds: HashSet::new(),
-            other_counters: other_counters,
-        }
-    }
 }
 impl SyncService<InputMessage> for GCounterService {
     fn process_message(&mut self, message: InputMessage, meta: MessageMeta) {
@@ -166,6 +91,23 @@ impl SyncService<InputMessage> for GCounterService {
         }
     }
 }
+impl DefaultInitService for GCounterService {
+    fn new(init_message: InitMessage) -> Self {
+        let other_counters = init_message
+            .node_ids
+            .into_iter()
+            .filter(|x| *x != init_message.node_id)
+            .map(|x| (x, 0))
+            .collect();
+        Self {
+            id: Default::default(),
+            node_id: init_message.node_id,
+            counter: 0,
+            processed_adds: HashSet::new(),
+            other_counters: other_counters,
+        }
+    }
+}
 
 fn main() {
     // cargo build --release && ./maelstrom/maelstrom test -w g-counter --bin ./target/release/gcounter --node-count 3 --rate 100 --time-limit 20 --nemesis partition
@@ -180,4 +122,62 @@ fn main() {
 
      */
     default_init_and_sync_loop::<GCounterService, InputMessage>(Some(400..=600));
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+enum InputMessage {
+    Add(AddMessage),
+    Read(ReadMessage),
+    Sync(SyncMessage),
+    WriteOk(KVWriteOkMessage),
+}
+
+#[derive(Debug, Deserialize)]
+struct AddMessage {
+    msg_id: usize,
+    delta: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "add_ok")]
+struct AddOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadMessage {
+    msg_id: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "read_ok")]
+struct ReadOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    value: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename = "sync")]
+struct SyncMessage {
+    value: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "write")]
+struct KVWriteMessage {
+    key: String,
+    value: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct KVWriteOkMessage {
+    // empty
 }

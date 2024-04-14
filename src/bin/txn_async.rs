@@ -9,24 +9,6 @@ use mael::init::DefaultInitService;
 use mael::messages::{ErrorCode, ErrorMessage, InitMessage, MessageMeta};
 use mael::output::output_reply;
 
-#[derive(Debug, Deserialize)]
-struct TxnMessage {
-    msg_id: usize,
-    txn: Vec<Statement>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Statement(char, usize, Option<usize>);
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "txn_ok")]
-struct TxnOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    txn: Vec<Statement>,
-}
-
 enum StatementError {
     InvalidAction(char),
     WriteNone,
@@ -38,13 +20,37 @@ struct TxnService {
     node_id: String,
     storage: RwLock<HashMap<usize, RwLock<Option<usize>>>>,
 }
-impl DefaultInitService for TxnService {
-    fn new(init_message: InitMessage) -> Self {
-        Self {
-            id: Default::default(),
-            node_id: init_message.node_id,
-            storage: Default::default(),
+impl AsyncService<TxnMessage> for TxnService {
+    async fn process_message(arc_self: Arc<Self>, message: TxnMessage, meta: MessageMeta) {
+        // try to process each statement in the transaction separately from each other, as if they are issued one by one and not as a batch
+        let mut response = vec![];
+        let mut changes = HashMap::new();
+        for stmt in message.txn {
+            let stmt_response = arc_self.process_statement(&stmt, &mut changes).await;
+            match stmt_response {
+                Ok(resp) => response.push(resp),
+                Err(err) => {
+                    Self::handle_error(err, message.msg_id, meta);
+                    return;
+                }
+            }
         }
+        let flush_result = arc_self.flush_writes(changes).await;
+        if let Err(err) = flush_result {
+            Self::handle_error(err, message.msg_id, meta);
+            return;
+        }
+
+        let output = TxnOkMessage {
+            msg_id: arc_self.id.next(),
+            in_reply_to: message.msg_id,
+            txn: response,
+        };
+        output_reply(output, meta);
+    }
+
+    async fn on_timeout(_arc_self: Arc<Self>) {
+        // empty
     }
 }
 impl TxnService {
@@ -172,38 +178,13 @@ impl TxnService {
         }
     }
 }
-impl AsyncService<TxnMessage> for TxnService {
-    async fn process_message(arc_self: Arc<Self>, message: TxnMessage, meta: MessageMeta) {
-        // try to process each statement in the transaction separately from each other, as if they are issued one by one and not as a batch
-        let mut response = vec![];
-        let mut changes = HashMap::new();
-
-        for stmt in message.txn {
-            let stmt_response = arc_self.process_statement(&stmt, &mut changes).await;
-            match stmt_response {
-                Ok(resp) => response.push(resp),
-                Err(err) => {
-                    Self::handle_error(err, message.msg_id, meta);
-                    return;
-                }
-            }
+impl DefaultInitService for TxnService {
+    fn new(init_message: InitMessage) -> Self {
+        Self {
+            id: Default::default(),
+            node_id: init_message.node_id,
+            storage: Default::default(),
         }
-        let flush_result = arc_self.flush_writes(changes).await;
-        if let Err(err) = flush_result {
-            Self::handle_error(err, message.msg_id, meta);
-            return;
-        }
-
-        let output = TxnOkMessage {
-            msg_id: arc_self.id.next(),
-            in_reply_to: message.msg_id,
-            txn: response,
-        };
-        output_reply(output, meta);
-    }
-
-    async fn on_timeout(_arc_self: Arc<Self>) {
-        // empty
     }
 }
 
@@ -219,4 +200,22 @@ async fn main() {
 
      */
     default_init_and_async_loop::<TxnService, TxnMessage>(None).await;
+}
+
+#[derive(Debug, Deserialize)]
+struct TxnMessage {
+    msg_id: usize,
+    txn: Vec<Statement>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Statement(char, usize, Option<usize>);
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "txn_ok")]
+struct TxnOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    txn: Vec<Statement>,
 }

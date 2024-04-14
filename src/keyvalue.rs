@@ -8,42 +8,6 @@ use crate::messages::{ErrorCode, ErrorMessageResponse, Message, MessageMeta};
 use crate::rpc_handler::{RpcError, RpcHandler};
 use crate::util::convert_json_value;
 
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "read")]
-struct KVReadMessage {
-    msg_id: usize,
-    key: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct KVReadOkMessage {
-    value: Value,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "cas")]
-struct KVCasMessage {
-    msg_id: usize,
-    key: String,
-    from: Value,
-    to: Value,
-    create_if_not_exists: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct KVCasOkMessage {}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-pub enum KVResponseMessage {
-    ReadOk(KVReadOkMessage),
-    CasOk(KVCasOkMessage),
-    Error(ErrorMessageResponse),
-}
-
 pub enum KVReadError {
     KeyDoesNotExist,
     Other,
@@ -121,7 +85,7 @@ impl LinKV {
                     Err(KVReadError::Other)
                 }
             },
-            _ => { 
+            _ => {
                 Self::log_error(response);
                 Err(KVReadError::Other)
             },
@@ -176,4 +140,40 @@ impl LinKV {
     pub fn init_response(&self, in_reply_to: usize, message: KVResponseMessage) {
         self.rpc.init_response(in_reply_to, message)
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "read")]
+struct KVReadMessage {
+    msg_id: usize,
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KVReadOkMessage {
+    value: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "cas")]
+struct KVCasMessage {
+    msg_id: usize,
+    key: String,
+    from: Value,
+    to: Value,
+    create_if_not_exists: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct KVCasOkMessage {}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum KVResponseMessage {
+    ReadOk(KVReadOkMessage),
+    CasOk(KVCasOkMessage),
+    Error(ErrorMessageResponse),
 }

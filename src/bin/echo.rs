@@ -6,30 +6,8 @@ use mael::init::DefaultInitService;
 use mael::messages::{InitMessage, MessageMeta};
 use mael::output::output_reply;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename = "echo")]
-struct EchoMessage {
-    msg_id: usize,
-    echo: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "echo_ok")]
-struct EchoOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    echo: String,
-}
-
 struct EchoService {
     id: MessageIdGenerator,
-}
-impl DefaultInitService for EchoService {
-    fn new(_: InitMessage) -> Self {
-        Self { id: Default::default() }
-    }
 }
 impl AsyncService<EchoMessage> for EchoService {
     async fn process_message(arc_self: Arc<Self>, message: EchoMessage, meta: MessageMeta) {
@@ -45,6 +23,11 @@ impl AsyncService<EchoMessage> for EchoService {
         // empty
     }
 }
+impl DefaultInitService for EchoService {
+    fn new(_: InitMessage) -> Self {
+        Self { id: Default::default() }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -55,4 +38,21 @@ async fn main() {
 
      */
     default_init_and_async_loop::<EchoService, EchoMessage>(None).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename = "echo")]
+struct EchoMessage {
+    msg_id: usize,
+    echo: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "echo_ok")]
+struct EchoOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    echo: String,
 }

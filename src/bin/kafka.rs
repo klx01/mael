@@ -13,78 +13,6 @@ use mael::messages::{AnyResponseMessage, ErrorCode, ErrorMessage, InitMessage, M
 use mael::output::output_reply;
 use mael::util::join_all;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-enum InputMessage {
-    Send(SendMessage),
-    Poll(PollMessage),
-    CommitOffsets(CommitOffsetsMessage),
-    ListCommittedOffsets(ListCommittedOffsetsMessage),
-    #[serde(untagged)]
-    Response(AnyResponseMessage<KVResponseMessage>),
-}
-
-#[derive(Debug, Deserialize)]
-struct SendMessage {
-    msg_id: usize,
-    key: String,
-    msg: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "send_ok")]
-struct SendOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    offset: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct PollMessage {
-    msg_id: usize,
-    offsets: HashMap<String, usize>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "poll_ok")]
-struct PollOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    msgs: HashMap<String, Vec<(usize, usize)>>
-}
-
-#[derive(Debug, Deserialize)]
-struct CommitOffsetsMessage {
-    msg_id: usize,
-    offsets: HashMap<String, usize>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "commit_offsets_ok")]
-struct CommitOffsetsOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListCommittedOffsetsMessage {
-    msg_id: usize,
-    keys: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "list_committed_offsets_ok")]
-struct ListCommittedOffsetsOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    offsets: HashMap<String, usize>,
-}
-
 const POLL_MAX_LEN: usize = 50;
 const REQUEST_TIMEOUT_MILLI: u64 = 1500;
 
@@ -93,6 +21,173 @@ struct KafkaService {
     node_id: String,
     messages: RwLock<HashMap<String, Vec<usize>>>,
     kv: LinKV,
+}
+impl AsyncService<InputMessage> for KafkaService {
+    async fn process_message(arc_self: Arc<Self>, message: InputMessage, meta: MessageMeta) {
+        match message {
+            InputMessage::Send(message) => {
+                /*
+                todo: correctly handle repeated incoming send messages
+                    i.e. cache the msg_id-s and return cached responses
+
+                todo: correctly handle dropped cas_ok responses
+                    i.e. store the msg_id-s of completed requests, check if id is already present before trying to append
+                 */
+                let offset = Self::await_with_timeout(
+                    arc_self.append_message_to_key(&message.key, message.msg),
+                    message.msg_id,
+                    &meta,
+                ).await;
+                let Some(offset) = offset else {
+                    return;
+                };
+                let output = SendOkMessage {
+                    msg_id: arc_self.id.next(),
+                    in_reply_to: message.msg_id,
+                    offset,
+                };
+                output_reply(output, meta);
+            }
+            InputMessage::Poll(message) => {
+                /*
+                baseline with timeout 400-600:
+                    server msgs-per-op 2.653712
+                    lag 0.795721333
+                with additional sync here and same timeout:
+                    server msgs-per-op 3.5643966
+                    lag 0.543353709
+                with reads for all requested keys in poll
+                    msgs-per-op 3.5553954 - this can be reduced 
+                    lag 0.0
+                    and a few failures. poll ok-count 7520, info-count 9; send ok-count 7045, info-count 3
+                    :info-txn-causes (:net-timeout)
+                    msgs-per-op can be reduced, since with this approach we don't need to store messages locally. So we can remove the background update requests, and read before trying to cas when handling Send
+                    todo: check where these failures come from
+                 */
+                //Self::sync_keys(Arc::clone(&arc_self), false).await;
+                /*let mut join_set = JoinSet::new();
+                for key in message.offsets.keys() {
+                    let key = key.clone();
+                    let arc_self = Arc::clone(&arc_self);
+                    join_set.spawn(async move {
+                        arc_self.refresh_messages_in_key(&key).await;
+                    });
+                }
+                join_all(join_set).await;*/
+
+                let lock = arc_self.messages.read().expect("got a poisoned lock, cant really handle it");
+                let mut response = HashMap::new();
+                for (key, offset) in message.offsets {
+                    let log = lock.get(&key);
+                    let Some(log) = log else {
+                        continue;
+                    };
+                    if offset >= log.len() {
+                        response.insert(key, vec![]);
+                        continue;
+                    }
+                    let last_index = cmp::min(offset + POLL_MAX_LEN, log.len());
+                    let messages = log[offset..last_index]
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(index, val)| (index + offset, val))
+                        .collect::<Vec<_>>();
+                    response.insert(key, messages);
+                }
+                drop(lock);
+
+                let output = PollOkMessage {
+                    msg_id: arc_self.id.next(),
+                    in_reply_to: message.msg_id,
+                    msgs: response,
+                };
+                output_reply(output, meta);
+            }
+            InputMessage::CommitOffsets(message) => {
+                let key_lengths = arc_self.copy_lengths();
+                for (key, offset) in message.offsets.iter() {
+                    let length = key_lengths.get(key);
+                    let Some(length) = length else {
+                        let error = ErrorMessage {
+                            in_reply_to: message.msg_id,
+                            code: ErrorCode::KeyDoesNotExist,
+                            text: format!("Key {key} was not initialised, can not commit"),
+                        };
+                        output_reply(error, meta);
+                        return;
+                    };
+                    if *offset >= *length {
+                        let error = ErrorMessage {
+                            in_reply_to: message.msg_id,
+                            code: ErrorCode::PreconditionFailed,
+                            text: format!("Offset {offset} does not exist for key {key}, can not commit"),
+                        };
+                        output_reply(error, meta);
+                        return;
+                    }
+                }
+
+                let result = Self::await_with_timeout(
+                    arc_self.commit_offsets(message.offsets),
+                    message.msg_id,
+                    &meta,
+                ).await;
+                let Some(_) = result else {
+                    return;
+                };
+
+                let output = CommitOffsetsOkMessage {
+                    msg_id: arc_self.id.next(),
+                    in_reply_to: message.msg_id,
+                };
+                output_reply(output, meta);
+            }
+            InputMessage::ListCommittedOffsets(message) => {
+                let offsets = Self::await_with_timeout(
+                    arc_self.read_committed_offsets(),
+                    message.msg_id,
+                    &meta,
+                ).await;
+                let Some(offsets) = offsets else {
+                    return;
+                };
+                let Some((offsets, _)) = offsets else {
+                    let error = ErrorMessage {
+                        in_reply_to: message.msg_id,
+                        code: ErrorCode::Unexpected,
+                        text: "Unexpected error when reading from the storage".to_string(),
+                    };
+                    output_reply(error, meta);
+                    return;
+                };
+
+                let mut response = HashMap::new();
+                for key in message.keys {
+                    let offset = offsets.get(&key);
+                    let Some(offset) = offset else {
+                        // the task description mentions that keys that don't exist can be omitted
+                        continue;
+                    };
+                    response.insert(key, *offset);
+                }
+
+                let output = ListCommittedOffsetsOkMessage {
+                    msg_id: arc_self.id.next(),
+                    in_reply_to: message.msg_id,
+                    offsets: response,
+                };
+                output_reply(output, meta);
+            }
+            InputMessage::Response(reply) => {
+                arc_self.kv.init_response(reply.in_reply_to, reply.data);
+            }
+        }
+    }
+
+    async fn on_timeout(arc_self: Arc<Self>) {
+        Self::sync_keys(arc_self, true).await;
+    }
 }
 impl DefaultInitService for KafkaService {
     fn new(init_message: InitMessage) -> Self {
@@ -335,172 +430,6 @@ impl KafkaService {
         join_all(join_set).await;
     }
 }
-impl AsyncService<InputMessage> for KafkaService {
-    async fn process_message(arc_self: Arc<Self>, message: InputMessage, meta: MessageMeta) {
-        match message {
-            InputMessage::Send(message) => {
-                /*
-                todo: correctly handle repeated incoming send messages
-                    i.e. cache the msg_id-s and return cached responses 
-                
-                todo: correctly handle dropped cas_ok responses
-                    i.e. store the msg_id-s of completed requests, check if id is already present before trying to append  
-                 */
-                let offset = Self::await_with_timeout(
-                    arc_self.append_message_to_key(&message.key, message.msg),
-                    message.msg_id,
-                    &meta,
-                ).await;
-                let Some(offset) = offset else {
-                    return;
-                };
-                let output = SendOkMessage {
-                    msg_id: arc_self.id.next(),
-                    in_reply_to: message.msg_id,
-                    offset,
-                };
-                output_reply(output, meta);
-            }
-            InputMessage::Poll(message) => {
-                /*
-                baseline with timeout 400-600:
-                    server msgs-per-op 2.653712
-                    lag 0.795721333
-                with additional sync here and same timeout:
-                    server msgs-per-op 3.5643966
-                    lag 0.543353709
-                with reads for all requested keys in poll
-                    msgs-per-op 3.5553954
-                    lag 0.0
-                    and a few failures. poll ok-count 7520, info-count 9; send ok-count 7045, info-count 3
-                    :info-txn-causes (:net-timeout)
-                    todo: check why it fails
-                 */
-                //Self::sync_keys(Arc::clone(&arc_self), false).await;
-                /*let mut join_set = JoinSet::new();
-                for key in message.offsets.keys() {
-                    let key = key.clone();
-                    let arc_self = Arc::clone(&arc_self);
-                    join_set.spawn(async move {
-                        arc_self.refresh_messages_in_key(&key).await;
-                    });
-                }
-                join_all(join_set).await;*/
-
-                let lock = arc_self.messages.read().expect("got a poisoned lock, cant really handle it");
-                let mut response = HashMap::new();
-                for (key, offset) in message.offsets {
-                    let log = lock.get(&key);
-                    let Some(log) = log else {
-                        continue;
-                    };
-                    if offset >= log.len() {
-                        response.insert(key, vec![]);
-                        continue;
-                    }
-                    let last_index = cmp::min(offset + POLL_MAX_LEN, log.len());
-                    let messages = log[offset..last_index]
-                        .iter()
-                        .copied()
-                        .enumerate()
-                        .map(|(index, val)| (index + offset, val))
-                        .collect::<Vec<_>>();
-                    response.insert(key, messages);
-                }
-                drop(lock);
-
-                let output = PollOkMessage {
-                    msg_id: arc_self.id.next(),
-                    in_reply_to: message.msg_id,
-                    msgs: response,
-                };
-                output_reply(output, meta);
-            }
-            InputMessage::CommitOffsets(message) => {
-                let key_lengths = arc_self.copy_lengths();
-                for (key, offset) in message.offsets.iter() {
-                    let length = key_lengths.get(key);
-                    let Some(length) = length else {
-                        let error = ErrorMessage {
-                            in_reply_to: message.msg_id,
-                            code: ErrorCode::KeyDoesNotExist,
-                            text: format!("Key {key} was not initialised, can not commit"),
-                        };
-                        output_reply(error, meta);
-                        return;
-                    };
-                    if *offset >= *length {
-                        let error = ErrorMessage {
-                            in_reply_to: message.msg_id,
-                            code: ErrorCode::PreconditionFailed,
-                            text: format!("Offset {offset} does not exist for key {key}, can not commit"),
-                        };
-                        output_reply(error, meta);
-                        return;
-                    }
-                }
-
-                let result = Self::await_with_timeout(
-                    arc_self.commit_offsets(message.offsets),
-                    message.msg_id,
-                    &meta,
-                ).await;
-                let Some(_) = result else {
-                    return;
-                };
-
-                let output = CommitOffsetsOkMessage {
-                    msg_id: arc_self.id.next(),
-                    in_reply_to: message.msg_id,
-                };
-                output_reply(output, meta);
-            }
-            InputMessage::ListCommittedOffsets(message) => {
-                let offsets = Self::await_with_timeout(
-                    arc_self.read_committed_offsets(),
-                    message.msg_id,
-                    &meta,
-                ).await;
-                let Some(offsets) = offsets else {
-                    return;
-                };
-                let Some((offsets, _)) = offsets else {
-                    let error = ErrorMessage {
-                        in_reply_to: message.msg_id,
-                        code: ErrorCode::Unexpected,
-                        text: "Unexpected error when reading from the storage".to_string(),
-                    };
-                    output_reply(error, meta);
-                    return;
-                };
-
-                let mut response = HashMap::new();
-                for key in message.keys {
-                    let offset = offsets.get(&key);
-                    let Some(offset) = offset else {
-                        // the task description mentions that keys that don't exist can be omitted
-                        continue;
-                    };
-                    response.insert(key, *offset);
-                }
-
-                let output = ListCommittedOffsetsOkMessage {
-                    msg_id: arc_self.id.next(),
-                    in_reply_to: message.msg_id,
-                    offsets: response,
-                };
-                output_reply(output, meta);
-            }
-            InputMessage::Response(reply) => {
-                arc_self.kv.init_response(reply.in_reply_to, reply.data);
-            }
-        }
-    }
-
-    async fn on_timeout(arc_self: Arc<Self>) {
-        Self::sync_keys(arc_self, true).await;
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -524,4 +453,76 @@ async fn main() {
 
      */
     default_init_and_async_loop::<KafkaService, InputMessage>(Some(400..=600)).await;
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+enum InputMessage {
+    Send(SendMessage),
+    Poll(PollMessage),
+    CommitOffsets(CommitOffsetsMessage),
+    ListCommittedOffsets(ListCommittedOffsetsMessage),
+    #[serde(untagged)]
+    Response(AnyResponseMessage<KVResponseMessage>),
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessage {
+    msg_id: usize,
+    key: String,
+    msg: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "send_ok")]
+struct SendOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    offset: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct PollMessage {
+    msg_id: usize,
+    offsets: HashMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "poll_ok")]
+struct PollOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    msgs: HashMap<String, Vec<(usize, usize)>>
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitOffsetsMessage {
+    msg_id: usize,
+    offsets: HashMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "commit_offsets_ok")]
+struct CommitOffsetsOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListCommittedOffsetsMessage {
+    msg_id: usize,
+    keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "list_committed_offsets_ok")]
+struct ListCommittedOffsetsOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    offsets: HashMap<String, usize>,
 }

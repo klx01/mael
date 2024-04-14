@@ -6,30 +6,9 @@ use mael::init::DefaultInitService;
 use mael::messages::{InitMessage, MessageMeta};
 use mael::output::output_reply;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename = "generate")]
-struct GenerateMessage {
-    msg_id: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename = "generate_ok")]
-struct GenerateOkMessage {
-    msg_id: usize,
-    in_reply_to: usize,
-    id: String,
-}
-
 struct UniqService {
     id: MessageIdGenerator,
     node_id: String,
-}
-impl DefaultInitService for UniqService {
-    fn new(init_message: InitMessage) -> Self {
-        Self { id: Default::default(), node_id: init_message.node_id }
-    }
 }
 impl AsyncService<GenerateMessage> for UniqService {
     async fn process_message(arc_self: Arc<Self>, message: GenerateMessage, meta: MessageMeta) {
@@ -46,6 +25,11 @@ impl AsyncService<GenerateMessage> for UniqService {
         // empty
     }
 }
+impl DefaultInitService for UniqService {
+    fn new(init_message: InitMessage) -> Self {
+        Self { id: Default::default(), node_id: init_message.node_id }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -56,4 +40,20 @@ async fn main() {
 
      */
     default_init_and_async_loop::<UniqService, GenerateMessage>(None).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename = "generate")]
+struct GenerateMessage {
+    msg_id: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename = "generate_ok")]
+struct GenerateOkMessage {
+    msg_id: usize,
+    in_reply_to: usize,
+    id: String,
 }
